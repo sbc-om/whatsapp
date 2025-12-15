@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+/* Enable class-based dark mode for Tailwind v4 */
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+
+  /* WhatsApp-like theme tokens */
+  --wa-green: #25d366;
+  --wa-green-dark: #128c7e;
+  --wa-app-bg: #0b141a;
+  --wa-panel: #ffffff;
+  --wa-chat-bg: #efeae2;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+:root.dark {
+  --background: #0a0a0a;
+  --foreground: #ededed;
+
+  --wa-app-bg: #0b141a;
+  --wa-panel: #0f172a;
+  --wa-chat-bg: #0b141a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light):not(.dark) {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+
+    --wa-app-bg: #0b141a;
+    --wa-panel: #0f172a;
+    --wa-chat-bg: #0b141a;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
