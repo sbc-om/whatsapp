@@ -104,8 +104,8 @@ export default function SettingsPage() {
           </Link>
         </header>
 
-        <div className="mt-6 overflow-hidden rounded-2xl bg-white shadow-[0_18px_60px_-30px_rgba(0,0,0,.45)] ring-1 ring-black/5 dark:bg-zinc-950 dark:ring-white/10">
-          <div className="flex items-center gap-2 border-b border-black/5 bg-(--wa-panel) p-2 dark:border-white/10 dark:bg-(--wa-panel)">
+        <div className="mt-6 overflow-hidden rounded-2xl bg-(--wa-panel) shadow-(--wa-shadow) ring-1 ring-(--wa-border)">
+          <div className="flex items-center gap-2 border-b border-(--wa-border) wa-elevated p-2">
             <button
               type="button"
               onClick={() => switchTab("language")}

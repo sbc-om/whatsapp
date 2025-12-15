@@ -8,11 +8,20 @@
   --foreground: #171717;
 
   /* WhatsApp-like theme tokens */
-  --wa-green: #25d366;
-  --wa-green-dark: #128c7e;
-  --wa-app-bg: #0b141a;
+  --wa-green: #00a884;
+  --wa-green-dark: #008069;
+  --wa-app-bg: #f0f2f5;
   --wa-panel: #ffffff;
+  --wa-panel-elev: #ffffff;
   --wa-chat-bg: #efeae2;
+  --wa-bubble-in: #ffffff;
+  --wa-bubble-out: #d9fdd3;
+  --wa-border: rgba(0, 0, 0, 0.06);
+  --wa-shadow: 0 18px 60px -30px rgba(0, 0, 0, 0.45);
+  --wa-chat-pattern: radial-gradient(circle at 20% 0%, rgba(0, 0, 0, 0.035), transparent 60%),
+    radial-gradient(circle at 80% 0%, rgba(0, 0, 0, 0.025), transparent 55%),
+    radial-gradient(circle at 40% 100%, rgba(0, 0, 0, 0.02), transparent 60%),
+    repeating-linear-gradient(45deg, rgba(0, 0, 0, 0.018) 0 14px, rgba(0, 0, 0, 0.012) 14px 28px);
 }
 
 @theme inline {
@@ -27,8 +36,17 @@
   --foreground: #ededed;
 
   --wa-app-bg: #0b141a;
-  --wa-panel: #0f172a;
+  --wa-panel: #111b21;
+  --wa-panel-elev: #202c33;
   --wa-chat-bg: #0b141a;
+  --wa-bubble-in: #202c33;
+  --wa-bubble-out: #005c4b;
+  --wa-border: rgba(255, 255, 255, 0.08);
+  --wa-shadow: 0 18px 60px -30px rgba(0, 0, 0, 0.65);
+  --wa-chat-pattern: radial-gradient(circle at 20% 0%, rgba(255, 255, 255, 0.06), transparent 60%),
+    radial-gradient(circle at 80% 0%, rgba(255, 255, 255, 0.05), transparent 55%),
+    radial-gradient(circle at 40% 100%, rgba(255, 255, 255, 0.04), transparent 60%),
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.03) 0 14px, rgba(255, 255, 255, 0.02) 14px 28px);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -45,5 +63,45 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, Segoe UI,
+    Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+.wa-elevated {
+  background: var(--wa-panel-elev);
+}
+
+.wa-chat-surface {
+  background-color: var(--wa-chat-bg);
+  background-image: var(--wa-chat-pattern);
+  background-size: auto;
+}
+
+/* Scrollbars (subtle, WhatsApp-like) */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, 0.22);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+:root.dark *::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.18);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(0, 0, 0, 0.3);
+}
+
+:root.dark *::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(255, 255, 255, 0.26);
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
 }

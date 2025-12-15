@@ -89,7 +89,7 @@ function PresencePill({
 }
 
 export default function WhatsAppShell() {
-  const { intlLocale, t } = useI18n();
+  const { dir, intlLocale, t } = useI18n();
 
   const [chats, setChats] = useState<Chat[]>(() => [...mockChats].sort(sortChats));
   const [messages, setMessages] = useState<ChatMessage[]>(() => [...mockMessages]);
@@ -231,17 +231,17 @@ export default function WhatsAppShell() {
       <div className="pointer-events-none absolute inset-x-0 top-0 h-36 bg-(--wa-green-dark)" />
 
       <div className="relative mx-auto flex h-full max-w-screen-2xl px-0 py-0 md:px-6 md:py-6">
-        <div className="flex h-full w-full overflow-hidden bg-white shadow-[0_18px_60px_-30px_rgba(0,0,0,.45)] ring-1 ring-black/5 dark:bg-zinc-950 dark:ring-white/10 md:rounded-2xl">
+        <div className="flex h-full w-full overflow-hidden bg-(--wa-panel) shadow-(--wa-shadow) ring-1 ring-(--wa-border) md:rounded-2xl">
           {/* Left: chat list */}
           <section
             className={cn(
-              "w-full border-r border-black/5 bg-(--wa-panel) dark:border-white/10 dark:bg-(--wa-panel) md:w-105",
+              "w-full border-r border-(--wa-border) bg-(--wa-panel) md:w-105",
               mobilePane === "chat" ? "hidden md:flex" : "flex",
               "flex-col",
             )}
             aria-label="Chats"
           >
-            <header className="flex items-center justify-between gap-3 border-b border-black/5 px-4 py-3 dark:border-white/10">
+            <header className="flex items-center justify-between gap-3 border-b border-(--wa-border) px-4 py-3 wa-elevated">
               <div className="flex items-center gap-3">
                 <Avatar title="Milad" bgClass="bg-(--wa-green-dark)" />
                 <div className="leading-tight">
@@ -272,12 +272,20 @@ export default function WhatsAppShell() {
 
             <div className="p-3">
               <div className="relative">
-                <IconSearch className="pointer-events-none absolute right-3 top-1/2 size-5 -translate-y-1/2 text-zinc-400" />
+                <IconSearch
+                  className={cn(
+                    "pointer-events-none absolute top-1/2 size-5 -translate-y-1/2 text-zinc-400",
+                    dir === "rtl" ? "right-3" : "left-3",
+                  )}
+                />
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   placeholder={t("searchChats")}
-                  className="h-11 w-full rounded-2xl border border-black/5 bg-white pr-11 pl-4 text-sm outline-none ring-(--wa-green)/30 focus:ring-4 dark:border-white/10 dark:bg-zinc-900"
+                  className={cn(
+                    "h-11 w-full rounded-2xl border border-(--wa-border) bg-(--wa-panel-elev) text-sm outline-none ring-(--wa-green)/30 focus:ring-4",
+                    dir === "rtl" ? "pr-4 pl-11" : "pl-11 pr-4",
+                  )}
                 />
               </div>
             </div>
@@ -354,7 +362,7 @@ export default function WhatsAppShell() {
             )}
             aria-label="Active chat"
           >
-            <header className="flex items-center justify-between gap-3 border-b border-black/5 bg-(--wa-panel) px-4 py-3 dark:border-white/10 dark:bg-(--wa-panel)">
+            <header className="flex items-center justify-between gap-3 border-b border-(--wa-border) px-4 py-3 wa-elevated">
               <div className="flex items-center gap-2">
                 <button
                   type="button"
@@ -400,13 +408,7 @@ export default function WhatsAppShell() {
               </div>
             </header>
 
-            <div
-              className={cn(
-                "relative min-h-0 flex-1 overflow-y-auto bg-(--wa-chat-bg)",
-                "bg-[radial-gradient(ellipse_at_top,rgba(0,0,0,.04),transparent_60%)] dark:bg-[radial-gradient(ellipse_at_top,rgba(255,255,255,.06),transparent_60%)]",
-              )}
-              ref={scrollRef}
-            >
+            <div className="wa-chat-surface relative min-h-0 flex-1 overflow-y-auto" ref={scrollRef}>
               <div className="mx-auto w-full max-w-3xl space-y-4 px-4 py-6">
                 {groups.length === 0 ? (
                   <div className="mt-20 text-center text-sm text-zinc-500 dark:text-zinc-400">
@@ -433,10 +435,10 @@ export default function WhatsAppShell() {
                         >
                           <div
                             className={cn(
-                              "relative max-w-[78%] rounded-2xl px-3 py-2 text-sm leading-7 shadow-sm ring-1 ring-black/5",
+                              "relative max-w-[78%] rounded-2xl px-3 py-2 text-sm leading-7 shadow-sm ring-1 ring-(--wa-border)",
                               m.direction === "out"
-                                ? "bg-[color-mix(in_oklab,var(--wa-green)_12%,white)] dark:bg-[color-mix(in_oklab,var(--wa-green)_16%,black)] dark:ring-white/10"
-                                : "bg-white dark:bg-zinc-900 dark:ring-white/10",
+                                ? "bg-(--wa-bubble-out)"
+                                : "bg-(--wa-bubble-in)",
                             )}
                           >
                             <div className="whitespace-pre-wrap">{m.text}</div>
@@ -457,7 +459,7 @@ export default function WhatsAppShell() {
               </div>
             </div>
 
-            <footer className="border-t border-black/5 bg-(--wa-panel) px-3 py-3 dark:border-white/10 dark:bg-(--wa-panel)">
+            <footer className="border-t border-(--wa-border) wa-elevated px-3 pt-3 pb-[calc(12px+env(safe-area-inset-bottom))]">
               <div className="mx-auto w-full max-w-3xl">
                 <div className="relative flex items-end gap-2">
                   {emojiOpen ? (
@@ -487,7 +489,7 @@ export default function WhatsAppShell() {
                     <IconClip className="size-5" />
                   </button>
 
-                  <div className="flex min-w-0 flex-1 items-end rounded-2xl border border-black/5 bg-white px-3 py-2 shadow-sm focus-within:ring-4 focus-within:ring-(--wa-green)/20 dark:border-white/10 dark:bg-zinc-900">
+                  <div className="flex min-w-0 flex-1 items-end rounded-2xl border border-(--wa-border) bg-(--wa-panel) px-3 py-2 shadow-sm focus-within:ring-4 focus-within:ring-(--wa-green)/20">
                     <textarea
                       ref={textareaRef}
                       value={draft}
