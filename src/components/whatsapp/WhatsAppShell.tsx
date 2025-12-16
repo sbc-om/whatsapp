@@ -660,7 +660,7 @@ export default function WhatsAppShell() {
                 <IconSearch
                   className={cn(
                     "pointer-events-none absolute top-1/2 size-5 -translate-y-1/2 text-zinc-400",
-                    dir === "rtl" ? "right-3" : "left-3",
+                    dir === "rtl" ? "left-3" : "left-3",
                   )}
                 />
                 <input
@@ -806,7 +806,7 @@ export default function WhatsAppShell() {
               <div className="mx-auto w-full max-w-3xl space-y-4 px-4 py-6">
                 {activeChat && chatInsights && !insightsLoading && !ml5Analyzing ? (
                   <div className="overflow-hidden rounded-2xl bg-(--wa-panel) shadow-sm ring-1 ring-(--wa-border)">
-                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-(--wa-border) px-4 py-3">
+                     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-(--wa-border) px-4 py-3">
                       <div className="flex items-center gap-2">
                         <div className="text-sm font-semibold">{t("insights")}</div>
                         <Badge label={remoteProvider ? "Online AI" : "Local AI"} />
