@@ -61,6 +61,7 @@ function parseWahaMessagePayload(payload: unknown): {
   chatId?: string;
   body?: string;
   fromMe?: boolean;
+  contactName?: string;
 } {
   if (typeof payload !== "object" || !payload) return {};
   const p = payload as Record<string, unknown>;
@@ -89,7 +90,21 @@ function parseWahaMessagePayload(payload: unknown): {
           ? p.caption
           : undefined;
 
-  return { chatId, body, fromMe };
+  // Extract contact name from various possible fields
+  let contactName: string | undefined;
+  if (typeof p._data === "object" && p._data) {
+    const data = p._data as Record<string, unknown>;
+    if (typeof data.notifyName === "string" && data.notifyName) {
+      contactName = data.notifyName;
+    } else if (typeof data.pushName === "string" && data.pushName) {
+      contactName = data.pushName;
+    }
+  }
+  if (!contactName && typeof p.name === "string" && p.name) {
+    contactName = p.name;
+  }
+
+  return { chatId, body, fromMe, contactName };
 }
 
 function sortChats(a: Chat, b: Chat) {
@@ -354,7 +369,7 @@ export default function WhatsAppShell() {
         const raw = JSON.parse(ev.data) as WahaEventEnvelope;
         console.log('🔵 UI received event:', raw.event, 'ID:', raw.id);
         
-        const { chatId, body, fromMe } = parseWahaMessagePayload(raw.payload);
+        const { chatId, body, fromMe, contactName } = parseWahaMessagePayload(raw.payload);
         if (!chatId || !body) {
           console.log('⚠️ Skipping event - no chatId or body');
           return;
@@ -362,6 +377,7 @@ export default function WhatsAppShell() {
 
         const internalChatId = `waha:${chatId}`;
         const sentAt = new Date(typeof raw.timestamp === "number" ? raw.timestamp : Date.now());
+        const phoneNumber = formatChatTitle(chatId);
 
         const msg: ChatMessage = {
           id: `w_${raw.id || Math.random().toString(16).slice(2)}`,
@@ -372,7 +388,7 @@ export default function WhatsAppShell() {
           status: fromMe ? "delivered" : undefined,
         };
 
-        console.log('📝 Creating message:', msg.id, 'text:', body);
+        console.log('📝 Creating message:', msg.id, 'text:', body, 'fromMe:', fromMe, 'contactName:', contactName);
 
         setMessages((prev) => {
           // De-dupe by id
@@ -390,7 +406,10 @@ export default function WhatsAppShell() {
             ? (prev.find((c) => c.id === internalChatId) as Chat)
             : {
                 id: internalChatId,
-                title: formatChatTitle(chatId),
+                // For outgoing messages (fromMe=true), contactName is sender (you), so use phoneNumber
+                // For incoming messages (fromMe=false), contactName is the sender's name
+                title: (!fromMe && contactName) ? contactName : phoneNumber,
+                phoneNumber: phoneNumber,
                 avatarBgClass: hashToBgClass(chatId),
                 lastMessagePreview: "",
                 lastMessageAt: sentAt,
@@ -681,6 +700,11 @@ export default function WhatsAppShell() {
                               <div className="truncate text-sm font-semibold">
                                 {c.title}
                               </div>
+                              {c.phoneNumber && (
+                                <div className="truncate text-xs text-zinc-500 dark:text-zinc-400">
+                                  {c.phoneNumber}
+                                </div>
+                              )}
                               <div className="mt-0.5 flex items-center gap-2">
                                 <PresencePill
                                   presence={c.presence}
@@ -745,11 +769,15 @@ export default function WhatsAppShell() {
                     <div className="leading-tight">
                       <div className="text-sm font-semibold">{activeChat.title}</div>
                       <div className="text-xs text-zinc-500 dark:text-zinc-400">
-                        {activeChat.presence === "typing"
-                          ? t("typing")
-                          : activeChat.presence === "online"
-                            ? t("online")
-                            : t("lastSeenRecently")}
+                        {activeChat.phoneNumber ? (
+                          <div>{activeChat.phoneNumber}</div>
+                        ) : activeChat.presence === "typing" ? (
+                          t("typing")
+                        ) : activeChat.presence === "online" ? (
+                          t("online")
+                        ) : (
+                          t("lastSeenRecently")
+                        )}
                       </div>
                     </div>
                   </>

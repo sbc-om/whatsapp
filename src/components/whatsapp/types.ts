@@ -12,6 +12,7 @@ export type ChatMessage = {
 export type Chat = {
   id: string;
   title: string;
+  phoneNumber?: string; // Phone number for display (e.g. "989185055006")
   avatarBgClass: string; // Tailwind class (e.g. "bg-emerald-500")
   lastMessagePreview: string;
   lastMessageAt: Date;
