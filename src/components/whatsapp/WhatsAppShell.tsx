@@ -4,8 +4,19 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import EmojiPanel from "@/components/emoji/EmojiPanel";
+import { useI18n } from "@/components/i18n/I18nProvider";
+import { getMl5SentimentModel } from "@/lib/insights/ml5Sentiment";
+import { ml5ScoreToMessageInsights, ml5ScoresToChatDistribution } from "@/lib/insights/ml5Mapping";
+import type { ChatInsights, InsightsRequest, InsightsResponse, MessageInsights } from "@/lib/insights/types";
 import { formatDayLabel, formatTime } from "./format";
-import { mockChats, mockMessages } from "./mock";
+import { readWahaUiSettings, WAHA_UI_SETTINGS_KEY } from "@/lib/wahaUiSettings";
+import {
+  clearChatUnread,
+  createOutgoingMessage,
+  scheduleOutgoingStatusSimulation,
+  setMessageStatus,
+  updateChatsOnNewMessage,
+} from "./messageService";
 import {
   IconArrowBack,
   IconCheck,
@@ -19,10 +30,66 @@ import {
   IconSend,
 } from "./icons";
 import type { Chat, ChatMessage } from "./types";
-import { useI18n } from "@/components/i18n/I18nProvider";
+import type { WahaEventEnvelope } from "@/types/waha";
 
 function cn(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
+}
+
+function hashToBgClass(input: string) {
+  const colors = [
+    "bg-emerald-500",
+    "bg-sky-500",
+    "bg-orange-500",
+    "bg-purple-500",
+    "bg-rose-500",
+    "bg-amber-500",
+    "bg-teal-500",
+    "bg-indigo-500",
+  ];
+  let h = 0;
+  for (let i = 0; i < input.length; i++) h = (h * 31 + input.charCodeAt(i)) >>> 0;
+  return colors[h % colors.length] ?? "bg-emerald-500";
+}
+
+function formatChatTitle(rawChatId: string): string {
+  // Remove @c.us suffix from WhatsApp chat IDs to show clean phone numbers
+  return rawChatId.replace(/@c\.us$/i, '');
+}
+
+function parseWahaMessagePayload(payload: unknown): {
+  chatId?: string;
+  body?: string;
+  fromMe?: boolean;
+} {
+  if (typeof payload !== "object" || !payload) return {};
+  const p = payload as Record<string, unknown>;
+
+  const fromMe = typeof p.fromMe === "boolean" ? p.fromMe : undefined;
+
+  // For outgoing messages (fromMe=true), use 'to' (recipient)
+  // For incoming messages (fromMe=false), use 'from' (sender)
+  const chatId =
+    typeof p.chatId === "string"
+      ? p.chatId
+      : fromMe
+        ? typeof p.to === "string"
+          ? p.to
+          : undefined
+        : typeof p.from === "string"
+          ? p.from
+          : undefined;
+
+  const body =
+    typeof p.body === "string"
+      ? p.body
+      : typeof p.text === "string"
+        ? p.text
+        : typeof p.caption === "string"
+          ? p.caption
+          : undefined;
+
+  return { chatId, body, fromMe };
 }
 
 function sortChats(a: Chat, b: Chat) {
@@ -88,17 +155,104 @@ function PresencePill({
   );
 }
 
-export default function WhatsAppShell() {
-  const { dir, intlLocale, t } = useI18n();
+function Badge({ label }: { label: string }) {
+  return (
+    <span className="inline-flex items-center rounded-full bg-black/5 px-2.5 py-1 text-[11px] font-semibold text-zinc-700 dark:bg-white/10 dark:text-zinc-100">
+      {label}
+    </span>
+  );
+}
 
-  const [chats, setChats] = useState<Chat[]>(() => [...mockChats].sort(sortChats));
-  const [messages, setMessages] = useState<ChatMessage[]>(() => [...mockMessages]);
-  const [activeChatId, setActiveChatId] = useState<string>(chats[0]?.id ?? "");
+function Bar({ value, variant }: { value: number; variant: "green" | "red" | "neutral" }) {
+  const v = Math.max(0, Math.min(100, value));
+  return (
+    <progress
+      className={cn(
+        "wa-progress",
+        variant === "green"
+          ? "wa-progress--green"
+          : variant === "red"
+            ? "wa-progress--red"
+            : "wa-progress--neutral",
+      )}
+      value={v}
+      max={100}
+      aria-label={String(v)}
+    />
+  );
+}
+
+function MessageInsightPill({
+  label,
+  value,
+  variant,
+  title,
+}: {
+  label: string;
+  value: number;
+  variant: "green" | "red" | "neutral";
+  title?: string;
+}) {
+  return (
+    <span
+      className={cn(
+        "inline-flex max-w-full items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold",
+        variant === "green"
+          ? "bg-[color-mix(in_oklab,var(--wa-green)_14%,transparent)] text-(--wa-green-dark)"
+          : variant === "red"
+            ? "bg-[color-mix(in_oklab,rgba(244,63,94,0.85)_14%,transparent)] text-rose-700 dark:text-rose-200"
+            : "bg-black/5 text-zinc-700 dark:bg-white/10 dark:text-zinc-200",
+      )}
+      title={title}
+    >
+      <span className="truncate">
+        {label} {value}%
+      </span>
+    </span>
+  );
+}
+
+export default function WhatsAppShell() {
+  const { dir, intlLocale, t, locale } = useI18n();
+
+  // Start empty: this screen should be driven by real WAHA events.
+  const [chats, setChats] = useState<Chat[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [activeChatId, setActiveChatId] = useState<string>("");
 
   const [mobilePane, setMobilePane] = useState<"list" | "chat">("list");
   const [query, setQuery] = useState("");
   const [draft, setDraft] = useState("");
   const [emojiOpen, setEmojiOpen] = useState(false);
+
+  const [wahaUiSettings, setWahaUiSettings] = useState(() => readWahaUiSettings());
+
+  // Keep session in sync if user changes it in Settings (localStorage).
+  useEffect(() => {
+    const sync = () => setWahaUiSettings(readWahaUiSettings());
+    sync();
+
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === WAHA_UI_SETTINGS_KEY) sync();
+    };
+
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("focus", sync);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("focus", sync);
+    };
+  }, []);
+
+  const [remoteChatInsights, setRemoteChatInsights] = useState<ChatInsights | null>(null);
+  const [remoteProvider, setRemoteProvider] = useState<InsightsResponse["provider"] | null>(null);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+
+  const [ml5Analyzing, setMl5Analyzing] = useState(false);
+  const [ml5ChatInsights, setMl5ChatInsights] = useState<ChatInsights | null>(null);
+  const [ml5MessageInsights, setMl5MessageInsights] = useState<Map<string, MessageInsights | null>>(
+    () => new Map(),
+  );
 
   const list = useMemo(() => {
     const q = query.trim();
@@ -108,17 +262,206 @@ export default function WhatsAppShell() {
   }, [chats, query]);
 
   const activeChat = useMemo(
-    () => chats.find((c) => c.id === activeChatId) ?? chats[0],
+    () => chats.find((c) => c.id === activeChatId) ?? null,
     [activeChatId, chats],
   );
 
   const activeMessages = useMemo(
-    () => messages.filter((m) => m.chatId === activeChat?.id).sort((a, b) => a.sentAt.getTime() - b.sentAt.getTime()),
-    [activeChat?.id, messages],
+    () =>
+      messages
+        .filter((m) => (activeChat ? m.chatId === activeChat.id : false))
+        .sort((a, b) => a.sentAt.getTime() - b.sentAt.getTime()),
+    [activeChat, messages],
   );
+
+  const activeMessagesRef = useRef<ChatMessage[]>([]);
+  useEffect(() => {
+    activeMessagesRef.current = activeMessages;
+  }, [activeMessages]);
+
+  // Instant analysis via ml5 (client-side). Hide UI while ml5 is running.
+  const ml5CacheRef = useRef<Map<string, MessageInsights | null>>(new Map());
+  useEffect(() => {
+    if (!activeChat) return;
+
+    let cancelled = false;
+    setMl5Analyzing(true);
+
+    (async () => {
+      const model = await getMl5SentimentModel();
+
+      const nextById = new Map<string, MessageInsights | null>();
+      const scores: number[] = [];
+
+      for (const m of activeMessages.slice(-80)) {
+        const cacheKey = `${m.id}:${m.text}`;
+        const cached = ml5CacheRef.current.get(cacheKey);
+        if (cached !== undefined) {
+          nextById.set(m.id, cached);
+          if (cached) scores.push(cached.sentiment);
+          continue;
+        }
+
+        const r = model.predict(m.text);
+        const score = typeof r?.score === "number" ? r.score : 0.5;
+        const ins = ml5ScoreToMessageInsights(score, m.text, locale);
+        ml5CacheRef.current.set(cacheKey, ins);
+        nextById.set(m.id, ins);
+        if (ins) scores.push(ins.sentiment);
+      }
+
+      const dist = ml5ScoresToChatDistribution(scores);
+      const chat: ChatInsights = {
+        chatId: activeChat.id,
+        label: dist.avg > 0.58 ? "positive" : dist.avg < 0.42 ? "negative" : "neutral",
+        sentiment: dist.avg,
+        salesOpportunityPct: dist.salesPct,
+        churnRiskPct: dist.churnPct,
+        neutralPct: dist.neutralPct,
+        summary: "",
+        keySignals: [],
+        nextBestActions: [],
+      };
+
+      if (cancelled) return;
+      setMl5MessageInsights(nextById);
+      setMl5ChatInsights(chat);
+    })()
+      .catch(() => {
+        if (cancelled) return;
+        setMl5MessageInsights(new Map());
+        setMl5ChatInsights(null);
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setMl5Analyzing(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeChat, activeMessages, locale]);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // WAHA realtime (SSE)
+  useEffect(() => {
+    const es = new EventSource("/api/waha/events");
+
+    es.onmessage = (ev) => {
+      try {
+        const raw = JSON.parse(ev.data) as WahaEventEnvelope;
+        console.log('🔵 UI received event:', raw.event, 'ID:', raw.id);
+        
+        const { chatId, body, fromMe } = parseWahaMessagePayload(raw.payload);
+        if (!chatId || !body) {
+          console.log('⚠️ Skipping event - no chatId or body');
+          return;
+        }
+
+        const internalChatId = `waha:${chatId}`;
+        const sentAt = new Date(typeof raw.timestamp === "number" ? raw.timestamp : Date.now());
+
+        const msg: ChatMessage = {
+          id: `w_${raw.id || Math.random().toString(16).slice(2)}`,
+          chatId: internalChatId,
+          direction: fromMe ? "out" : "in",
+          text: body,
+          sentAt,
+          status: fromMe ? "delivered" : undefined,
+        };
+
+        console.log('📝 Creating message:', msg.id, 'text:', body);
+
+        setMessages((prev) => {
+          // De-dupe by id
+          if (prev.some((m) => m.id === msg.id)) {
+            console.log('🔄 Duplicate message detected, skipping:', msg.id);
+            return prev;
+          }
+          console.log('✅ Adding new message:', msg.id);
+          return [...prev, msg];
+        });
+
+        setChats((prev) => {
+          const exists = prev.some((c) => c.id === internalChatId);
+          const nextChat: Chat = exists
+            ? (prev.find((c) => c.id === internalChatId) as Chat)
+            : {
+                id: internalChatId,
+                title: formatChatTitle(chatId),
+                avatarBgClass: hashToBgClass(chatId),
+                lastMessagePreview: "",
+                lastMessageAt: sentAt,
+                unreadCount: 0,
+                presence: "online" as const,
+              };
+
+          // Use functional update to get current activeChatId without adding it as dependency
+          const unreadBump = fromMe ? 0 : 1;
+          const updated: Chat = {
+            ...nextChat,
+            lastMessageAt: sentAt,
+            lastMessagePreview: body,
+            unreadCount: Math.max(0, (nextChat.unreadCount ?? 0) + unreadBump),
+            presence: fromMe ? "online" : "online",
+          };
+
+          const without = prev.filter((c) => c.id !== internalChatId);
+          return [updated, ...without];
+        });
+
+        // Auto-open the first chat we ever receive.
+        setActiveChatId((curr) => (curr ? curr : internalChatId));
+      } catch {
+        // ignore
+      }
+    };
+
+    return () => es.close();
+  }, []); // Empty dependency array - only run once on mount
+
+  const runChatInsights = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!activeChat) return;
+
+      const latest = activeMessagesRef.current;
+      const payload: InsightsRequest = {
+        uiLocale: locale,
+        chats: [
+          {
+            chatId: activeChat.id,
+            title: activeChat.title,
+            messages: latest.slice(-80).map((m) => ({
+              direction: m.direction,
+              text: m.text,
+              sentAt: m.sentAt.toISOString(),
+            })),
+          },
+        ],
+      };
+
+      setInsightsLoading(true);
+      try {
+        const res = await fetch("/api/insights/analyze", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+          signal,
+        });
+        const json = (await res.json()) as InsightsResponse;
+        setRemoteProvider(json.provider);
+        setRemoteChatInsights(json.chats[0] ?? null);
+      } catch {
+        setRemoteProvider(null);
+        setRemoteChatInsights(null);
+      } finally {
+        setInsightsLoading(false);
+      }
+    },
+    [activeChat, locale],
+  );
 
   const insertEmoji = useCallback(
     (emoji: string) => {
@@ -145,21 +488,42 @@ export default function WhatsAppShell() {
     el.scrollTop = el.scrollHeight;
   }, [activeChat?.id, activeMessages.length]);
 
+  // Reset Gemini insights when switching chats/locales; run only on button click.
+  useEffect(() => {
+    setRemoteChatInsights(null);
+    setRemoteProvider(null);
+  }, [activeChatId, locale]);
+
   const openChat = useCallback((id: string) => {
     setActiveChatId(id);
     setMobilePane("chat");
     setEmojiOpen(false);
-    setChats((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, unreadCount: 0 } : c)),
-    );
+    setChats((prev) => clearChatUnread(prev, id));
   }, []);
 
   const send = useCallback(() => {
     const text = draft.trim();
     if (!text || !activeChat) return;
 
-    const msg: ChatMessage = {
-      id: `m_${Math.random().toString(16).slice(2)}`,
+    const isWaha = activeChat.id.startsWith("waha:");
+    if (!isWaha) {
+      // Fallback (kept for future non-WAHA sources)
+      const msg = createOutgoingMessage({ chatId: activeChat.id, text });
+      setMessages((prev) => [...prev, msg]);
+      setDraft("");
+      setChats((prev) => updateChatsOnNewMessage(prev, msg));
+      scheduleOutgoingStatusSimulation({
+        messageId: msg.id,
+        onStatus: (status) => setMessages((prev) => setMessageStatus(prev, msg.id, status)),
+      });
+      return;
+    }
+
+    const rawChatId = activeChat.id.slice("waha:".length);
+
+    // Optimistic UI message
+    const optimistic: ChatMessage = {
+      id: `local_${Math.random().toString(16).slice(2)}`,
       chatId: activeChat.id,
       direction: "out",
       text,
@@ -167,37 +531,32 @@ export default function WhatsAppShell() {
       status: "sent",
     };
 
-    setMessages((prev) => [...prev, msg]);
+    setMessages((prev) => [...prev, optimistic]);
+    setChats((prev) => updateChatsOnNewMessage(prev, optimistic));
     setDraft("");
 
-    setChats((prev) => {
-      const next = prev.map((c) =>
-        c.id === activeChat.id
-          ? {
-              ...c,
-              lastMessageAt: msg.sentAt,
-              lastMessagePreview: msg.text,
-              unreadCount: 0,
-              presence: "online" as const,
-            }
-          : c,
-      );
-      return next;
-    });
-
-    // Simulate quick delivery/read to make the UI feel alive.
-    window.setTimeout(() => {
-      setMessages((prev) =>
-        prev.map((m) => (m.id === msg.id ? { ...m, status: "delivered" } : m)),
-      );
-    }, 650);
-
-    window.setTimeout(() => {
-      setMessages((prev) =>
-        prev.map((m) => (m.id === msg.id ? { ...m, status: "read" } : m)),
-      );
-    }, 1400);
-  }, [activeChat, draft]);
+    void fetch("/api/waha/send", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        type: "text",
+        chatId: rawChatId,
+        text,
+        session: wahaUiSettings.session,
+      }),
+    })
+      .then(async (r) => {
+        if (!r.ok) throw new Error("send_failed");
+        return r.json();
+      })
+      .then(() => {
+        setMessages((prev) => setMessageStatus(prev, optimistic.id, "delivered"));
+      })
+      .catch(() => {
+        // If send fails, keep message but mark as sent (no extra UI yet)
+        setMessages((prev) => setMessageStatus(prev, optimistic.id, "sent"));
+      });
+  }, [activeChat, draft, wahaUiSettings.session]);
 
   const groups = useMemo(() => {
     const out: Array<{ key: string; label: string; items: ChatMessage[] }> = [];
@@ -226,6 +585,8 @@ export default function WhatsAppShell() {
     return out;
   }, [activeMessages, intlLocale, t]);
 
+  const chatInsights = remoteChatInsights ?? ml5ChatInsights;
+
   return (
     <div className="relative h-dvh min-h-screen bg-(--wa-app-bg) text-zinc-900 dark:text-zinc-50">
       <div className="pointer-events-none absolute inset-x-0 top-0 h-36 bg-(--wa-green-dark)" />
@@ -246,9 +607,6 @@ export default function WhatsAppShell() {
                 <Avatar title="Milad" bgClass="bg-(--wa-green-dark)" />
                 <div className="leading-tight">
                   <div className="text-sm font-semibold">{t("appTitle")}</div>
-                  <div className="text-xs text-zinc-500 dark:text-zinc-400">
-                    {t("uiPrototype")}
-                  </div>
                 </div>
               </div>
 
@@ -260,6 +618,14 @@ export default function WhatsAppShell() {
                 >
                   <IconNewChat className="size-5" />
                 </button>
+                <Link
+                  href="/insights"
+                  className="inline-flex size-10 items-center justify-center rounded-xl text-zinc-600 hover:bg-black/5 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-white/10 dark:hover:text-white"
+                  aria-label={t("insights")}
+                  title={t("insights")}
+                >
+                  <span className="text-sm font-semibold">AI</span>
+                </Link>
                 <Link
                   href="/settings"
                   className="inline-flex size-10 items-center justify-center rounded-xl text-zinc-600 hover:bg-black/5 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-white/10 dark:hover:text-white"
@@ -410,6 +776,50 @@ export default function WhatsAppShell() {
 
             <div className="wa-chat-surface relative min-h-0 flex-1 overflow-y-auto" ref={scrollRef}>
               <div className="mx-auto w-full max-w-3xl space-y-4 px-4 py-6">
+                {activeChat && chatInsights && !insightsLoading && !ml5Analyzing ? (
+                  <div className="overflow-hidden rounded-2xl bg-(--wa-panel) shadow-sm ring-1 ring-(--wa-border)">
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-(--wa-border) px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <div className="text-sm font-semibold">{t("insights")}</div>
+                        <Badge label={remoteProvider ? "Online AI" : "Local AI"} />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={insightsLoading ? undefined : () => runChatInsights()}
+                        disabled={insightsLoading}
+                        className="inline-flex h-9 items-center justify-center rounded-xl px-3 text-sm font-medium text-zinc-700 hover:bg-black/5 dark:text-zinc-200 dark:hover:bg-white/10"
+                        aria-label={t("analyze")}
+                      >
+                        {t("analyze")}
+                      </button>
+                    </div>
+
+                    <div className="grid gap-3 px-4 py-3">
+                      {chatInsights.summary ? (
+                        <div className="text-xs text-zinc-600 dark:text-zinc-300">{chatInsights.summary}</div>
+                      ) : null}
+
+                      <div className="grid grid-cols-3 gap-2 text-[11px] text-zinc-500 dark:text-zinc-400">
+                        <div>
+                          {t("salesOpportunity")}: <span className="font-semibold text-zinc-700 dark:text-zinc-100">{chatInsights.salesOpportunityPct}%</span>
+                        </div>
+                        <div>
+                          {t("churnRisk")}: <span className="font-semibold text-zinc-700 dark:text-zinc-100">{chatInsights.churnRiskPct}%</span>
+                        </div>
+                        <div>
+                          {t("neutral")}: <span className="font-semibold text-zinc-700 dark:text-zinc-100">{chatInsights.neutralPct}%</span>
+                        </div>
+                      </div>
+
+                      <div className="grid gap-2">
+                        <Bar value={chatInsights.salesOpportunityPct} variant="green" />
+                        <Bar value={chatInsights.churnRiskPct} variant="red" />
+                        <Bar value={chatInsights.neutralPct} variant="neutral" />
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+
                 {groups.length === 0 ? (
                   <div className="mt-20 text-center text-sm text-zinc-500 dark:text-zinc-400">
                     {t("selectAChat")}
@@ -442,13 +852,53 @@ export default function WhatsAppShell() {
                             )}
                           >
                             <div className="whitespace-pre-wrap">{m.text}</div>
-                            <div className="mt-1 flex items-center justify-end gap-1 text-[11px] text-zinc-500 dark:text-zinc-400">
-                              <span>{formatTime(m.sentAt, intlLocale)}</span>
-                              {m.direction === "out" ? (
-                                <span className="-mr-0.5 text-zinc-500 dark:text-zinc-400">
-                                  <StatusIcon status={m.status} />
-                                </span>
-                              ) : null}
+                            <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-zinc-500 dark:text-zinc-400">
+                              <div className="min-w-0">
+                                {(() => {
+                                  if (insightsLoading || ml5Analyzing) return null;
+                                  const ins = ml5MessageInsights.get(m.id);
+                                  if (!ins) return null;
+                                  const primaryLabel =
+                                    ins.primary === "salesOpportunity"
+                                      ? t("salesOpportunity")
+                                      : ins.primary === "churnRisk"
+                                        ? t("churnRisk")
+                                        : t("neutral");
+                                  const primaryValue =
+                                    ins.primary === "salesOpportunity"
+                                      ? ins.salesOpportunityPct
+                                      : ins.primary === "churnRisk"
+                                        ? ins.churnRiskPct
+                                        : ins.neutralPct;
+                                  const variant =
+                                    ins.primary === "salesOpportunity"
+                                      ? "green"
+                                      : ins.primary === "churnRisk"
+                                        ? "red"
+                                        : "neutral";
+
+                                  // For per-message UI, don't show mostly-neutral pills.
+                                  if (ins.primary === "neutral") return null;
+
+                                  return (
+                                    <MessageInsightPill
+                                      label={primaryLabel}
+                                      value={primaryValue}
+                                      variant={variant}
+                                      title={ins.keySignals.join(" • ")}
+                                    />
+                                  );
+                                })()}
+                              </div>
+
+                              <div className="flex shrink-0 items-center justify-end gap-1">
+                                <span>{formatTime(m.sentAt, intlLocale)}</span>
+                                {m.direction === "out" ? (
+                                  <span className="-mr-0.5 text-zinc-500 dark:text-zinc-400">
+                                    <StatusIcon status={m.status} />
+                                  </span>
+                                ) : null}
+                              </div>
                             </div>
                           </div>
                         </div>
@@ -520,10 +970,6 @@ export default function WhatsAppShell() {
                     {draft.trim() ? <IconSend className="size-5" /> : <IconMic className="size-5" />}
                   </button>
                 </div>
-              </div>
-
-              <div className="mx-auto mt-2 w-full max-w-3xl text-center text-[11px] text-zinc-400">
-                {t("stageUiOnly")}
               </div>
             </footer>
           </section>

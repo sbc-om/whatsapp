@@ -44,6 +44,13 @@ type Keys =
   | "themeSystem"
   | "themeLight"
   | "themeDark"
+  | "insights"
+  | "salesOpportunity"
+  | "churnRisk"
+  | "neutral"
+  | "analyzing"
+  | "refresh"
+    | "analyze"  // New key for Gemini analysis button
   | "apiConnection"
   | "apiBaseUrl"
   | "apiKey"
@@ -88,6 +95,13 @@ export const translations: Record<AppLocale, I18nDict> = {
     themeSystem: "System",
     themeLight: "Light",
     themeDark: "Dark",
+    insights: "Insights",
+    salesOpportunity: "Sales opportunity",
+    churnRisk: "Churn risk",
+    neutral: "Neutral",
+    analyzing: "Analyzing…",
+    refresh: "Refresh",
+      analyze: "Analyze",  // New translation for English
     apiConnection: "API connection",
     apiBaseUrl: "API base URL",
     apiKey: "API key",
@@ -129,6 +143,13 @@ export const translations: Record<AppLocale, I18nDict> = {
     themeSystem: "سیستم",
     themeLight: "روشن",
     themeDark: "تاریک",
+    insights: "تحلیل‌ها",
+    salesOpportunity: "فرصت فروش",
+    churnRisk: "ریسک خروج",
+    neutral: "خنثی",
+    analyzing: "در حال تحلیل…",
+    refresh: "به‌روزرسانی",
+      analyze: "تحلیل",  // New translation for Persian
     apiConnection: "اتصال به API",
     apiBaseUrl: "آدرس پایهٔ API",
     apiKey: "کلید API",
@@ -170,6 +191,13 @@ export const translations: Record<AppLocale, I18nDict> = {
     themeSystem: "النظام",
     themeLight: "فاتح",
     themeDark: "داكن",
+    insights: "تحليلات",
+    salesOpportunity: "فرصة بيع",
+    churnRisk: "خطر مغادرة",
+    neutral: "محايد",
+    analyzing: "جارٍ التحليل…",
+    refresh: "تحديث",
+      analyze: "تحليل",  // New translation for Arabic
     apiConnection: "اتصال API",
     apiBaseUrl: "عنوان URL الأساسي للـ API",
     apiKey: "مفتاح API",

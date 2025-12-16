@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { cookies } from "next/headers";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -18,13 +19,23 @@ export const metadata: Metadata = {
   description: "A professional WhatsApp-style UI (API integration comes next).",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const cookieStore = await cookies();
+  const themeCookie = cookieStore.get("wa.ui.theme")?.value;
+  const initialThemeClass =
+    themeCookie === "light" ? "light" : themeCookie === "dark" ? "dark" : "";
+
   return (
-    <html lang="en" dir="ltr" suppressHydrationWarning>
+    <html
+      lang="en"
+      dir="ltr"
+      className={initialThemeClass}
+      suppressHydrationWarning
+    >
       <head>
         <script
           // Prevent light/dark theme flash on refresh by setting the class before hydration.

@@ -12,6 +12,7 @@ type ThemeContextValue = {
 };
 
 const THEME_STORAGE_KEY = "wa.ui.theme";
+const THEME_COOKIE_KEY = "wa.ui.theme";
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
@@ -73,10 +74,27 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     applyThemeToDocument(theme, resolvedTheme);
   }, [resolvedTheme, theme]);
 
+  // Keep a cookie in sync so SSR can avoid a theme flash (for explicit light/dark choices).
+  useEffect(() => {
+    try {
+      const maxAge = 60 * 60 * 24 * 365; // 1 year
+      document.cookie = `${THEME_COOKIE_KEY}=${encodeURIComponent(theme)}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
+    } catch {
+      // ignore
+    }
+  }, [theme]);
+
   const setTheme = useCallback((next: ThemePreference) => {
     setThemeState(next);
     try {
       window.localStorage.setItem(THEME_STORAGE_KEY, next);
+    } catch {
+      // ignore
+    }
+
+    try {
+      const maxAge = 60 * 60 * 24 * 365; // 1 year
+      document.cookie = `${THEME_COOKIE_KEY}=${encodeURIComponent(next)}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
     } catch {
       // ignore
     }

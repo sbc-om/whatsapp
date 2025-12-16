@@ -2,11 +2,12 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { useI18n } from "@/components/i18n/I18nProvider";
 import { localeInfo, type AppLocale } from "@/components/i18n/translations";
 import { useTheme, type ThemePreference } from "@/components/theme/ThemeProvider";
+import { readWahaUiSettings, writeWahaUiSettings, type WahaUiSettings } from "@/lib/wahaUiSettings";
 
 function cn(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
@@ -17,6 +18,17 @@ type SettingsTab = "language" | "appearance" | "api";
 type ApiSettings = {
   baseUrl: string;
   apiKey: string;
+};
+
+type WahaConfig = {
+  ok: true;
+  apiUrl: string;
+  hasApiKey: boolean;
+  ws?: {
+    started: boolean;
+    connected: boolean;
+    url: string;
+  };
 };
 
 const API_SETTINGS_STORAGE_KEY = "wa.api.settings";
@@ -55,7 +67,18 @@ export default function SettingsPage() {
   const tab = useMemo(() => normalizeTab(params.get("tab")), [params]);
 
   const [apiSettings, setApiSettings] = useState<ApiSettings>(() => readApiSettings());
+  const [wahaUiSettings, setWahaUiSettings] = useState<WahaUiSettings>(() => readWahaUiSettings());
+  const [wahaConfig, setWahaConfig] = useState<WahaConfig | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
+
+  // Fetch server-side WAHA config (safe: no secrets returned)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    fetch("/api/waha/config")
+      .then((r) => r.json())
+      .then((j) => setWahaConfig(j as WahaConfig))
+      .catch(() => setWahaConfig(null));
+  }, []);
 
   const switchTab = (nextTab: SettingsTab) => {
     const url =
@@ -71,6 +94,13 @@ export default function SettingsPage() {
     const next = { baseUrl: apiSettings.baseUrl.trim(), apiKey: apiSettings.apiKey.trim() };
     writeApiSettings(next);
     setApiSettings(next);
+    setSavedAt(Date.now());
+  };
+
+  const saveWaha = () => {
+    const next: WahaUiSettings = { session: wahaUiSettings.session.trim() || "default" };
+    writeWahaUiSettings(next);
+    setWahaUiSettings(next);
     setSavedAt(Date.now());
   };
 
@@ -211,6 +241,63 @@ export default function SettingsPage() {
             ) : (
               <div className="space-y-4">
                 <p className="text-sm text-zinc-500 dark:text-zinc-400">{t("apiSettingsNote")}</p>
+
+                <div className="rounded-2xl border border-(--wa-border) bg-(--wa-panel) p-4">
+                  <div className="text-sm font-semibold">WAHA</div>
+                  <div className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                    {wahaConfig?.ok
+                      ? `API: ${wahaConfig.apiUrl || "(not set)"} • key: ${wahaConfig.hasApiKey ? "set" : "missing"}${
+                          wahaConfig.ws
+                            ? ` • ws: ${wahaConfig.ws.connected ? "connected" : wahaConfig.ws.started ? "starting" : "stopped"}`
+                            : ""
+                        }`
+                      : "API: (unknown)"}
+                  </div>
+
+                  <div className="mt-3 grid gap-3">
+                    <label className="grid gap-1">
+                      <span className="text-xs font-medium text-zinc-700 dark:text-zinc-200">
+                        WAHA session
+                      </span>
+                      <input
+                        value={wahaUiSettings.session}
+                        onChange={(e) => setWahaUiSettings((prev) => ({ ...prev, session: e.target.value }))}
+                        placeholder="default"
+                        className="h-11 w-full rounded-2xl border border-black/10 bg-white px-4 text-sm outline-none ring-(--wa-green)/30 focus:ring-4 dark:border-white/10 dark:bg-zinc-900"
+                      />
+                      <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                        Used when sending messages from the composer.
+                      </span>
+                    </label>
+
+
+                    <div className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                      SSE stream: <span className="font-mono">/api/waha/events</span>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={saveWaha}
+                      className="inline-flex h-10 items-center justify-center rounded-xl bg-(--wa-green) px-4 text-sm font-semibold text-white shadow-sm hover:brightness-[.98]"
+                    >
+                      {t("save")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        fetch("/api/waha/config")
+                          .then((r) => r.json())
+                          .then((j) => setWahaConfig(j as WahaConfig))
+                          .catch(() => setWahaConfig(null))
+                      }
+                      className="inline-flex h-10 items-center justify-center rounded-xl px-4 text-sm font-medium text-zinc-700 hover:bg-black/5 dark:text-zinc-200 dark:hover:bg-white/10"
+                    >
+                      {t("refresh")}
+                    </button>
+                  </div>
+                </div>
 
                 <div className="grid gap-3">
                   <label className="grid gap-1">

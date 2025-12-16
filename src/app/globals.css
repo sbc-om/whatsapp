@@ -105,3 +105,47 @@ body {
 *::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* Insights progress bars */
+.wa-progress {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  -webkit-appearance: none;
+  appearance: none;
+  --wa-progress-track: rgba(0, 0, 0, 0.08);
+  --wa-progress-fill: rgba(0, 0, 0, 0.25);
+}
+
+:root.dark .wa-progress {
+  --wa-progress-track: rgba(255, 255, 255, 0.10);
+  --wa-progress-fill: rgba(255, 255, 255, 0.25);
+}
+
+.wa-progress--green {
+  --wa-progress-fill: var(--wa-green);
+}
+
+.wa-progress--red {
+  --wa-progress-fill: rgba(244, 63, 94, 0.85);
+}
+
+.wa-progress--neutral {
+  --wa-progress-fill: rgba(161, 161, 170, 0.8);
+}
+
+.wa-progress::-webkit-progress-bar {
+  background: var(--wa-progress-track);
+  border-radius: 999px;
+}
+
+.wa-progress::-webkit-progress-value {
+  background: var(--wa-progress-fill);
+  border-radius: 999px;
+}
+
+.wa-progress::-moz-progress-bar {
+  background: var(--wa-progress-fill);
+  border-radius: 999px;
+}
