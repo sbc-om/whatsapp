@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
-import { cookies } from "next/headers";
 import { Geist, Geist_Mono } from "next/font/google";
+
+import { ThemeProvider } from "@/app/components/ThemeProvider";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -12,60 +13,44 @@ const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
 });
-import Providers from "./providers";
 
 export const metadata: Metadata = {
-  title: "WhatsApp Web — UI",
-  description: "A professional WhatsApp-style UI (API integration comes next).",
+  title: "WhatsApp API Service",
+  description: "Next.js WhatsApp messaging API powered by whatsapp-web.js",
 };
 
-export default async function RootLayout({
+export default function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const cookieStore = await cookies();
-  const themeCookie = cookieStore.get("wa.ui.theme")?.value;
-  const initialThemeClass =
-    themeCookie === "light" ? "light" : themeCookie === "dark" ? "dark" : "";
+  const themeInitScript = `(() => {
+    try {
+      const key = "wappapi-theme";
+      const saved = localStorage.getItem(key);
+      const mode = saved === "light" || saved === "dark" || saved === "system"
+        ? saved
+        : "system";
+      const theme = mode === "system"
+        ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+        : mode;
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.style.colorScheme = theme;
+      document.documentElement.classList.toggle("dark", theme === "dark");
+    } catch {}
+  })();`;
 
   return (
-    <html
-      lang="en"
-      dir="ltr"
-      className={initialThemeClass}
-      suppressHydrationWarning
-    >
+    <html lang="en" suppressHydrationWarning>
       <head>
-        <script
-          // Prevent light/dark theme flash on refresh by setting the class before hydration.
-          // Uses the same storage key as ThemeProvider.
-          dangerouslySetInnerHTML={{
-            __html: `(() => {
-  try {
-    const key = 'wa.ui.theme';
-    const raw = localStorage.getItem(key);
-    const theme = raw === 'light' || raw === 'dark' || raw === 'system' ? raw : 'system';
-    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-    const resolved = theme === 'system' ? (prefersDark ? 'dark' : 'light') : theme;
-
-    const root = document.documentElement;
-    root.classList.remove('dark', 'light');
-    if (theme === 'light') root.classList.add('light');
-    else if (resolved === 'dark') root.classList.add('dark');
-
-    root.style.colorScheme = resolved;
-  } catch {
-    // ignore
-  }
-})();`,
-          }}
-        />
+        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
       </head>
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        className={`${geistSans.variable} ${geistMono.variable} antialiased transition-colors duration-300`}
       >
-        <Providers>{children}</Providers>
+        <ThemeProvider>
+          {children}
+        </ThemeProvider>
       </body>
     </html>
   );
