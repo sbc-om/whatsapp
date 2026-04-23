@@ -1271,7 +1271,7 @@ export function ChatPanel({ sessionId }: { sessionId: string }) {
       setLoadingMsgs(true);
       try {
         const res = await fetch(
-          `/api/admin/chats/messages?sessionId=${sessionId}&chatId=${chatId}&limit=50`
+          `/api/admin/chats/messages?sessionId=${encodeURIComponent(sessionId)}&chatId=${encodeURIComponent(chatId)}&limit=50`
         );
         const data = await res.json();
         setMessages(data?.data?.messages || []);

@@ -11,11 +11,24 @@ export const runtime = "nodejs";
  */
 export async function GET(request: NextRequest) {
   const sessionId = request.nextUrl.searchParams.get("sessionId") || "main";
-  const chatId = request.nextUrl.searchParams.get("chatId");
+  const rawChatId = request.nextUrl.searchParams.get("chatId");
   const limit = Math.min(parseInt(request.nextUrl.searchParams.get("limit") || "50", 10), 500);
 
-  if (!chatId) {
+  if (!rawChatId) {
     return fail("BAD_REQUEST", "chatId query param is required", 400);
+  }
+
+  let chatId = rawChatId.trim();
+  for (let i = 0; i < 2; i += 1) {
+    try {
+      const decoded = decodeURIComponent(chatId);
+      if (decoded === chatId) {
+        break;
+      }
+      chatId = decoded;
+    } catch {
+      break;
+    }
   }
 
   try {
@@ -23,9 +36,13 @@ export async function GET(request: NextRequest) {
     return ok({ messages });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to get messages";
-    if (message.includes("The browser is already running for")) {
-      return ok({ messages: [], warning: message });
-    }
-    return fail("BAD_REQUEST", message, 400);
+    const stack = error instanceof Error ? error.stack : undefined;
+    console.error(
+      `[api/admin/chats/messages] sessionId=${sessionId} chatId=${chatId} error=${message}`,
+      stack,
+    );
+
+    // Never block the UI — always return an empty list with a warning instead of 400.
+    return ok({ messages: [], warning: message });
   }
 }

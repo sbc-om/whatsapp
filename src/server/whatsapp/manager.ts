@@ -598,6 +598,25 @@ class SessionManager {
     return contactId.includes("@") ? contactId : toWhatsAppChatId(contactId);
   }
 
+  private normalizeChatId(chatId: string) {
+    let normalized = String(chatId).trim();
+
+    // Decode a couple of times to tolerate already-encoded ids (e.g. %40lid or %2540lid).
+    for (let i = 0; i < 2; i += 1) {
+      try {
+        const decoded = decodeURIComponent(normalized);
+        if (decoded === normalized) {
+          break;
+        }
+        normalized = decoded;
+      } catch {
+        break;
+      }
+    }
+
+    return normalized;
+  }
+
   async blockContact(sessionId: string, contactId: string) {
     const client = await this.ensureSession(sessionId);
     const normalizedContactId = this.normalizeContactId(contactId);
@@ -642,10 +661,336 @@ class SessionManager {
 
   async getChatMessages(sessionId: string, chatId: string, limit = 50) {
     const client = await this.ensureSession(sessionId);
+    const normalizedChatId = this.normalizeChatId(chatId);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const chat = await (client as any).getChatById(chatId);
+    const targetClient = client as any;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const messages = await (chat as any).fetchMessages({ limit });
+    let chat: any = null;
+
+    // Resolve @lid → @c.us via the in-page Store when possible.
+    // `@lid` chats frequently throw inside WhatsApp Web's own bundle when
+    // accessed through fetchMessages, but resolving their phone-number WID
+    // first makes them behave like a normal @c.us chat.
+    let resolvedChatId = normalizedChatId;
+    if (normalizedChatId.endsWith("@lid")) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const pupPage = targetClient.pupPage as any;
+        if (pupPage && typeof pupPage.evaluate === "function") {
+          const mapped: string | null = await pupPage.evaluate(
+            (lid: string) => {
+              try {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const store = (window as any).Store;
+                if (!store) return null;
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const wid = store.WidFactory?.createWid?.(lid);
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const pn = store.LidUtils?.getPhoneNumber?.(wid)
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  ?? store.LidUtils?.getCurrentLidPn?.(wid);
+                if (pn?._serialized) return pn._serialized;
+                return null;
+              } catch {
+                return null;
+              }
+            },
+            normalizedChatId,
+          );
+          if (mapped && typeof mapped === "string") {
+            resolvedChatId = mapped;
+          }
+        }
+      } catch (error) {
+        console.warn(
+          `[whatsapp/manager] LID→PN resolution failed for ${normalizedChatId}:`,
+          error instanceof Error ? error.message : error,
+        );
+      }
+    }
+
+    // Resolve from the cached chat list first. This is the same surface that
+    // powers the admin chat list and avoids getChatById(), which can leak WA
+    // bundle exceptions to the server console for some chats.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const chats = (await targetClient.getChats()) as any[];
+      const [requestedUser, requestedServer = ""] = String(resolvedChatId).split("@");
+      chat = chats.find((candidate) => {
+        const candidateId = candidate?.id?._serialized ?? String(candidate?.id ?? "");
+        const normalizedCandidateId = this.normalizeChatId(candidateId);
+
+        if (
+          candidateId === chatId
+          || candidateId === normalizedChatId
+          || candidateId === resolvedChatId
+          || normalizedCandidateId === resolvedChatId
+          || normalizedCandidateId === normalizedChatId
+        ) {
+          return true;
+        }
+
+        const [candidateUser, candidateServer = ""] = normalizedCandidateId.split("@");
+        if (!candidateUser || candidateUser !== requestedUser) {
+          return false;
+        }
+
+        const equivalentServers = new Set([requestedServer, "lid", "c.us", "g.us"]);
+        return equivalentServers.has(candidateServer);
+      });
+    } catch (error) {
+      console.warn(
+        `[whatsapp/manager] getChats lookup failed for ${normalizedChatId}:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+
+    if (!chat) {
+      // No chat found — return empty list rather than throwing.
+      // The UI will show "no messages yet" instead of an error toast.
+      console.warn(
+        `[whatsapp/manager] Chat not found, returning empty messages for ${normalizedChatId}`,
+      );
+      return [];
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const targetChat = chat as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let messages: any[] = [];
+
+    // Primary path: in-page evaluation that mirrors whatsapp-web.js's
+    // Chat.fetchMessages but wraps loadEarlierMsgs in try/catch so transient
+    // bundle errors (common for @lid and some @g.us chats) don't fail the
+    // whole request. Returns whatever is already cached on failure.
+    const pupPage = targetClient.pupPage;
+    const chatIdSerialized: string =
+      targetChat?.id?._serialized ?? resolvedChatId ?? normalizedChatId;
+
+    const runPageFetch = async () => {
+      if (!pupPage || typeof pupPage.evaluate !== "function") {
+        return null;
+      }
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (await pupPage.evaluate(
+          async (chatIdParam: string, max: number) => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const WWebJS = (window as any).WWebJS;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const Store = (window as any).Store;
+            if (!Store) return [];
+
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const msgFilter = (m: any) => {
+              if (!m) return false;
+              if (m.isNotification) return false;
+              return true;
+            };
+
+            // Resolve the chat model without going through findOrCreateLatestChat
+            // (that path can throw for @lid / @g.us chats in the WA Web bundle).
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            let chat: any = null;
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const wid = Store.WidFactory?.createWid?.(chatIdParam);
+              if (wid && Store.Chat?.get) {
+                chat = Store.Chat.get(wid) || Store.Chat.get(chatIdParam) || null;
+              }
+            } catch {
+              chat = null;
+            }
+
+            if (!chat) {
+              try {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const models: any[] = Store.Chat?.getModelsArray?.() ?? [];
+                chat = models.find((c) => c?.id?._serialized === chatIdParam) ?? null;
+              } catch {
+                chat = null;
+              }
+            }
+
+            if (!chat && WWebJS?.getChat) {
+              try {
+                chat = await WWebJS.getChat(chatIdParam, { getAsModel: false });
+              } catch {
+                chat = null;
+              }
+            }
+
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            let msgs: any[] = [];
+            try {
+              msgs = chat?.msgs?.getModelsArray?.().filter(msgFilter) ?? [];
+            } catch {
+              msgs = [];
+            }
+
+            // Do not call loadEarlierMsgs here.
+            // On some WhatsApp Web builds it throws from internal loading helpers
+            // (e.g. waitForChatLoading) and breaks the whole request. We prefer
+            // returning the messages already cached for the chat over throwing.
+
+            if ((!msgs || msgs.length === 0) && chat?.lastMessage) {
+              msgs = [chat.lastMessage].filter(msgFilter);
+            }
+
+            if (msgs.length > max) {
+              msgs.sort((a, b) => (a.t > b.t ? 1 : -1));
+              msgs = msgs.slice(msgs.length - max);
+            }
+
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return msgs
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              .map((m: any) => {
+                try {
+                  if (WWebJS.getMessageModel) {
+                    return WWebJS.getMessageModel(m);
+                  }
+                } catch {
+                  // fallthrough to manual serialization
+                }
+                try {
+                  return {
+                    id: {
+                      _serialized: m.id?._serialized ?? String(m.id),
+                      fromMe: !!m.id?.fromMe,
+                    },
+                    from: m.from?._serialized ?? m.from,
+                    to: m.to?._serialized ?? m.to,
+                    fromMe: !!m.id?.fromMe,
+                    body: m.body ?? "",
+                    type: m.type ?? "chat",
+                    timestamp: m.t ?? 0,
+                    hasMedia: !!m.mediaKey || !!m.deprecatedMms3Url,
+                    ack: m.ack ?? 0,
+                    author: m.author?._serialized ?? m.author,
+                  };
+                } catch {
+                  return null;
+                }
+              })
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              .filter((m: any) => m !== null);
+          },
+          chatIdSerialized,
+          limit,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        )) as any[];
+      } catch (error) {
+        console.warn(
+          `[whatsapp/manager] in-page fetch failed for ${chatIdSerialized}:`,
+          error instanceof Error ? error.message : error,
+        );
+        return null;
+      }
+    };
+
+    const pageResult = await runPageFetch();
+    if (Array.isArray(pageResult)) {
+      messages = pageResult;
+    } else {
+      messages = [];
+    }
+
+    // Also cross-reference Store.Msg cache so we include any messages that
+    // exist in-memory but weren't surfaced by the primary path.
+    try {
+      if (pupPage && typeof pupPage.evaluate === "function") {
+        const cacheIds = Array.from(
+          new Set(
+            [chatIdSerialized, resolvedChatId, normalizedChatId, chatId].filter(
+              (value): value is string => typeof value === "string" && value.length > 0,
+            ),
+          ),
+        );
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const cached = (await pupPage.evaluate(
+          (ids: string[], max: number) => {
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const Store = (window as any).Store;
+              if (!Store?.Msg?.getModelsArray) return [];
+              const idSet = new Set(ids);
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const all: any[] = Store.Msg.getModelsArray();
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const picked: any[] = [];
+              for (const m of all) {
+                try {
+                  const remote =
+                    m?.id?.remote?._serialized
+                    ?? (typeof m?.from === "object"
+                      ? m.from._serialized
+                      : m?.from);
+                  if (remote && idSet.has(remote)) {
+                    picked.push({
+                      id: {
+                        _serialized: m.id?._serialized ?? String(m.id),
+                        fromMe: !!m.id?.fromMe,
+                      },
+                      from: m.from?._serialized ?? m.from,
+                      to: m.to?._serialized ?? m.to,
+                      fromMe: !!m.id?.fromMe,
+                      body: m.body ?? "",
+                      type: m.type ?? "chat",
+                      timestamp: m.t ?? 0,
+                      hasMedia: !!m.mediaKey || !!m.deprecatedMms3Url,
+                      ack: m.ack ?? 0,
+                      author: m.author?._serialized ?? m.author,
+                    });
+                  }
+                } catch {
+                  // skip
+                }
+              }
+              picked.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+              return picked.slice(-max);
+            } catch {
+              return [];
+            }
+          },
+          cacheIds,
+          limit,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        )) as any[];
+
+        if (Array.isArray(cached) && cached.length > 0) {
+          const seenIds = new Set(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            messages.map((m: any) => m?.id?._serialized).filter(Boolean),
+          );
+          for (const m of cached) {
+            const key = m?.id?._serialized;
+            if (key && !seenIds.has(key)) {
+              messages.push(m);
+              seenIds.add(key);
+            }
+          }
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          messages.sort((a: any, b: any) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+          if (messages.length > limit) {
+            messages = messages.slice(messages.length - limit);
+          }
+        }
+      }
+    } catch (error) {
+      console.warn(
+        `[whatsapp/manager] Store.Msg cross-reference failed for ${chatIdSerialized}:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+
+    if (messages.length === 0 && targetChat?.lastMessage) {
+      messages = [targetChat.lastMessage];
+    }
+
+    if (!Array.isArray(messages)) {
+      return [];
+    }
 
     // Build reactions from _data (synchronous, reliable for fetched messages)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -704,13 +1049,46 @@ class SessionManager {
       })
     );
 
+    const normalizeTimestamp = (value: unknown) => {
+      if (typeof value !== "number" || Number.isNaN(value) || value <= 0) {
+        return Date.now();
+      }
+
+      return value > 1_000_000_000_000 ? value : value * 1000;
+    };
+
+    const serializeWidLike = (value: unknown) => {
+      if (!value) {
+        return undefined;
+      }
+
+      if (typeof value === "string") {
+        return value;
+      }
+
+      if (typeof value === "object") {
+        const wid = value as { _serialized?: string; user?: string; server?: string };
+        if (typeof wid._serialized === "string") {
+          return wid._serialized;
+        }
+        if (typeof wid.user === "string" && typeof wid.server === "string") {
+          return `${wid.user}@${wid.server}`;
+        }
+      }
+
+      return String(value);
+    };
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return messages.map((msg: any) => {
-      const msgId = msg.id?._serialized ?? String(msg.id);
+    const normalizeMessage = (msg: any) => {
+      const timestamp = normalizeTimestamp(msg?.timestamp ?? msg?.t);
+      const msgId = msg?.id?._serialized
+        ?? (typeof msg?.id === "string" ? msg.id : undefined)
+        ?? `${chatIdSerialized}:${timestamp}:${msg?.fromMe ? "me" : "them"}`;
+
       // Prefer async reactions (getReactions) over _data.reactions, merge both
       const fromData = extractReactions(msg);
       const fromAsync = asyncReactionsMap.get(msgId) || [];
-      // Deduplicate by senderId+emoji
       const seen = new Set<string>();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const allReactions: any[] = [];
@@ -725,34 +1103,45 @@ class SessionManager {
       return {
         id: msgId,
         sessionId,
-        from: msg.from,
-        to: msg.to,
-        fromMe: !!msg.fromMe,
-        body: msg.body ?? "",
-        type: msg.type ?? "chat",
-        timestamp: msg.timestamp ? msg.timestamp * 1000 : Date.now(),
-        hasMedia: !!msg.hasMedia,
-        mimetype: msg._data?.mimetype,
-        filename: msg._data?.filename,
-        isForwarded: !!msg.isForwarded,
-        isStarred: !!msg.isStarred,
-        isStatus: !!msg.isStatus,
-        ack: msg.ack ?? 0,
-        author: msg.author,
-        mentionedIds: msg.mentionedIds ?? [],
-        hasQuotedMsg: !!msg.hasQuotedMsg,
-        quotedMsgId: msg.hasQuotedMsg ? msg._data?.quotedStanzaID : undefined,
+        from: serializeWidLike(msg?.from) ?? (msg?.fromMe ? undefined : chatIdSerialized),
+        to: serializeWidLike(msg?.to) ?? (msg?.fromMe ? chatIdSerialized : undefined),
+        fromMe: !!msg?.fromMe,
+        body: msg?.body ?? msg?.caption ?? "",
+        type: msg?.type ?? "chat",
+        timestamp,
+        hasMedia: !!msg?.hasMedia,
+        mimetype: msg?._data?.mimetype,
+        filename: msg?._data?.filename,
+        isForwarded: !!msg?.isForwarded,
+        isStarred: !!msg?.isStarred,
+        isStatus: !!msg?.isStatus,
+        ack: msg?.ack ?? 0,
+        author: serializeWidLike(msg?.author),
+        mentionedIds: msg?.mentionedIds ?? [],
+        hasQuotedMsg: !!msg?.hasQuotedMsg,
+        quotedMsgId: msg?.hasQuotedMsg ? msg?._data?.quotedStanzaID : undefined,
         reactions: allReactions,
-        location: msg.location
+        location: msg?.location
           ? {
               latitude: msg.location.latitude,
               longitude: msg.location.longitude,
               description: msg.location.description,
             }
           : undefined,
-        vCards: msg.vCards ?? [],
+        vCards: msg?.vCards ?? [],
       };
-    });
+    };
+
+    return messages
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .map((msg: any) => {
+        try {
+          return normalizeMessage(msg);
+        } catch {
+          return null;
+        }
+      })
+      .filter((msg): msg is NonNullable<typeof msg> => msg !== null);
   }
 
   async sendSeen(sessionId: string, chatId: string) {
