@@ -820,6 +820,15 @@ class SessionManager {
               }
             }
 
+            if (chat && Store.Cmd?.openChatBottom) {
+              try {
+                await Store.Cmd.openChatBottom({ chat });
+                await new Promise((resolve) => setTimeout(resolve, 80));
+              } catch {
+                // ignore chat-open failures and continue with whatever is cached
+              }
+            }
+
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             let msgs: any[] = [];
             try {
@@ -828,10 +837,42 @@ class SessionManager {
               msgs = [];
             }
 
-            // Do not call loadEarlierMsgs here.
-            // On some WhatsApp Web builds it throws from internal loading helpers
-            // (e.g. waitForChatLoading) and breaks the whole request. We prefer
-            // returning the messages already cached for the chat over throwing.
+            const mergeUnique = (items: any[]) => {
+              const seen = new Set();
+              return items.filter((item: any) => {
+                const key = item?.id?._serialized ?? String(item?.id ?? "");
+                if (!key || seen.has(key)) {
+                  return false;
+                }
+                seen.add(key);
+                return true;
+              });
+            };
+
+            if (chat && max > 0 && Store.ConversationMsgs?.loadEarlierMsgs) {
+              let guard = 0;
+              while (msgs.length < max && guard < 24) {
+                guard += 1;
+                let loaded = null;
+                try {
+                  loaded = await Store.ConversationMsgs.loadEarlierMsgs(chat, chat.msgs);
+                } catch {
+                  try {
+                    loaded = await Store.ConversationMsgs.loadEarlierMsgs(chat);
+                  } catch {
+                    break;
+                  }
+                }
+
+                const loadedFiltered = Array.isArray(loaded) ? loaded.filter(msgFilter) : [];
+                if (!loadedFiltered.length) {
+                  break;
+                }
+
+                const current = chat?.msgs?.getModelsArray?.().filter(msgFilter) ?? msgs;
+                msgs = mergeUnique([...loadedFiltered, ...current, ...msgs]);
+              }
+            }
 
             if ((!msgs || msgs.length === 0) && chat?.lastMessage) {
               msgs = [chat.lastMessage].filter(msgFilter);
@@ -840,6 +881,8 @@ class SessionManager {
             if (msgs.length > max) {
               msgs.sort((a, b) => (a.t > b.t ? 1 : -1));
               msgs = msgs.slice(msgs.length - max);
+            } else {
+              msgs.sort((a, b) => (a.t > b.t ? 1 : -1));
             }
 
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1141,7 +1184,9 @@ class SessionManager {
           return null;
         }
       })
-      .filter((msg): msg is NonNullable<typeof msg> => msg !== null);
+      .filter((msg): msg is NonNullable<typeof msg> => msg !== null)
+      .sort((left, right) => left.timestamp - right.timestamp)
+      .filter((msg, index, items) => index === items.findIndex((candidate) => candidate.id === msg.id));
   }
 
   async sendSeen(sessionId: string, chatId: string) {
