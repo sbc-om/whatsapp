@@ -12,7 +12,11 @@ export const runtime = "nodejs";
 export async function GET(request: NextRequest) {
   const sessionId = request.nextUrl.searchParams.get("sessionId") || "main";
   const rawChatId = request.nextUrl.searchParams.get("chatId");
-  const limit = Math.min(parseInt(request.nextUrl.searchParams.get("limit") || "50", 10), 500);
+  const rawLimit = request.nextUrl.searchParams.get("limit");
+  const parsedLimit = rawLimit ? parseInt(rawLimit, 10) : undefined;
+  const limit = Number.isFinite(parsedLimit)
+    ? Math.min(Math.max(parsedLimit ?? 0, 1), 500)
+    : undefined;
 
   if (!rawChatId) {
     return fail("BAD_REQUEST", "chatId query param is required", 400);

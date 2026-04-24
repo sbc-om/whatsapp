@@ -290,8 +290,6 @@ function InlineMediaThumb({
   useEffect(() => {
     if (!isInView || media || error) return;
     let ignore = false;
-    setLoading(true);
-    setError(false);
     fetch(`/api/admin/messages/media?sessionId=${sessionId}&messageId=${msgId}`)
       .then((r) => r.json())
       .then((d) => {
@@ -857,7 +855,7 @@ function ChatActionBar({
 
 /* ─────────────────── Message Bubble ─────────────────── */
 
-function MessageBubble({
+const MessageBubble = React.memo(function MessageBubble({
   message,
   sessionId,
   onContextMenu,
@@ -991,11 +989,16 @@ function MessageBubble({
       onContextMenu={(e) => onContextMenu(e, message)}
     >
       <div className="flex flex-col max-w-[80%]">
+        {!fromMe && senderName && (
+          <div className="mb-1 px-1 text-[11px] font-medium text-left text-sky-300">
+            {senderName}
+          </div>
+        )}
         <div
           className={`relative rounded-2xl shadow-sm ${
             fromMe
-              ? `rounded-br-md bg-emerald-900/60 text-emerald-50 ${isVisualMedia ? "p-1.5" : "px-3 py-2"}`
-              : `rounded-bl-md bg-zinc-800/80 text-zinc-100 ${isVisualMedia ? "p-1.5" : "px-3 py-2"}`
+              ? `rounded-br-md border border-emerald-400/20 bg-emerald-700/85 text-white ${isVisualMedia ? "p-1.5" : "px-3 py-2"}`
+              : `rounded-bl-md border border-sky-400/15 bg-zinc-800/95 text-zinc-100 ${isVisualMedia ? "p-1.5" : "px-3 py-2"}`
           }`}
         >
         {/* Quoted message */}
@@ -1084,7 +1087,7 @@ function MessageBubble({
       </div>
     </div>
   );
-}
+});
 
 /* ─────────────────── Chat List Item ─────────────────── */
 
@@ -1153,12 +1156,16 @@ function ChatListItem({
    ═══════════════════════════════════════════════════ */
 
 export function ChatPanel({ sessionId }: { sessionId: string }) {
+  const INITIAL_MESSAGES_LIMIT = 200;
+  const MESSAGE_LIMIT_STEP = 200;
+
   /* ── State ── */
   const [chats, setChats] = useState<Chat[]>([]);
   const [filteredChats, setFilteredChats] = useState<Chat[]>([]);
   const [chatSearch, setChatSearch] = useState("");
   const [selectedChat, setSelectedChat] = useState<Chat | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [messageLimit, setMessageLimit] = useState(INITIAL_MESSAGES_LIMIT);
   const [msgText, setMsgText] = useState("");
   const [loadingChats, setLoadingChats] = useState(false);
   const [loadingMsgs, setLoadingMsgs] = useState(false);
@@ -1193,6 +1200,19 @@ export function ChatPanel({ sessionId }: { sessionId: string }) {
   const messengerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const preserveScrollOnPrependRef = useRef(false);
+  const previousScrollHeightRef = useRef<number | null>(null);
+
+  /* ── Stable refs for SSE callbacks ── */
+  const selectedChatRef = useRef<Chat | null>(null);
+  useEffect(() => {
+    selectedChatRef.current = selectedChat;
+  }, [selectedChat]);
+
+  const messagesRef = useRef<Message[]>([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   /* ── Fetch chats ── */
   const fetchChats = useCallback(async () => {
@@ -1267,27 +1287,35 @@ export function ChatPanel({ sessionId }: { sessionId: string }) {
 
   /* ── Fetch messages ── */
   const fetchMessages = useCallback(
-    async (chatId: string) => {
+    async (chatId: string, limitOverride?: number) => {
       setLoadingMsgs(true);
       try {
+        const effectiveLimit = limitOverride ?? messageLimit;
         const res = await fetch(
-          `/api/admin/chats/messages?sessionId=${encodeURIComponent(sessionId)}&chatId=${encodeURIComponent(chatId)}&limit=50`
+          `/api/admin/chats/messages?sessionId=${encodeURIComponent(sessionId)}&chatId=${encodeURIComponent(chatId)}&limit=${effectiveLimit}`
         );
         const data = await res.json();
-        setMessages(data?.data?.messages || []);
+        const nextMessages = Array.isArray(data?.data?.messages)
+          ? [...data.data.messages].sort(
+              (left, right) => (left?.timestamp || 0) - (right?.timestamp || 0)
+            )
+          : [];
+        setMessages(nextMessages);
       } catch {
         /* ignore */
       } finally {
         setLoadingMsgs(false);
       }
     },
-    [sessionId]
+    [messageLimit, sessionId]
   );
 
   /* ── Select chat ── */
   const openChat = useCallback(
     (chat: Chat) => {
+      const nextLimit = INITIAL_MESSAGES_LIMIT;
       setSelectedChat(chat);
+      setMessageLimit(nextLimit);
       setMessages([]);
       setReplyTo(null);
       setEditMessage(null);
@@ -1295,45 +1323,280 @@ export function ChatPanel({ sessionId }: { sessionId: string }) {
       setShowMsgSearch(false);
       setMsgSearch("");
       setContextMenu(null);
-      fetchMessages(chat.id);
+      fetchMessages(chat.id, nextLimit);
     },
     [fetchMessages]
   );
 
   /* ── Scroll to bottom ── */
   useEffect(() => {
-    if (messengerRef.current && messages.length > 0) {
-      messengerRef.current.scrollTop = messengerRef.current.scrollHeight;
+    const el = messengerRef.current;
+    if (!el || messages.length === 0) {
+      return;
     }
+
+    if (preserveScrollOnPrependRef.current && previousScrollHeightRef.current !== null) {
+      const heightDelta = el.scrollHeight - previousScrollHeightRef.current;
+      el.scrollTop += heightDelta;
+      preserveScrollOnPrependRef.current = false;
+      previousScrollHeightRef.current = null;
+      return;
+    }
+
+    el.scrollTop = el.scrollHeight;
   }, [messages]);
+
+  const handleLoadOlderMessages = useCallback(() => {
+    if (!selectedChat || loadingMsgs) return;
+    const nextLimit = messageLimit + MESSAGE_LIMIT_STEP;
+    if (messengerRef.current) {
+      previousScrollHeightRef.current = messengerRef.current.scrollHeight;
+      preserveScrollOnPrependRef.current = true;
+    }
+    setMessageLimit(nextLimit);
+    fetchMessages(selectedChat.id, nextLimit);
+  }, [fetchMessages, loadingMsgs, messageLimit, selectedChat]);
+
+  /* ────────────── Real-time SSE ────────────── */
+
+  const fetchChatsRef = useRef(fetchChats);
+  useEffect(() => {
+    fetchChatsRef.current = fetchChats;
+  }, [fetchChats]);
+
+  const mergeLiveMessage = useCallback((incoming: unknown) => {
+    if (!incoming || typeof incoming !== "object") return;
+    const raw = incoming as {
+      id?: string;
+      from?: string;
+      to?: string;
+      fromMe?: boolean;
+      body?: string;
+      type?: string;
+      timestamp?: number;
+      hasMedia?: boolean;
+      hasQuotedMsg?: boolean;
+      quotedMsgId?: string;
+      isStarred?: boolean;
+      ack?: number;
+      author?: string;
+      vCards?: string[];
+      location?: { latitude: number; longitude: number; description?: string };
+    };
+
+    const id = raw.id;
+    if (!id) return;
+
+    const chatKey = raw.fromMe ? raw.to : raw.from;
+    const activeChatId = selectedChatRef.current?.id;
+
+    // Always keep the chat list in sync (last message / unread badge)
+    fetchChatsRef.current?.();
+
+    if (!activeChatId || activeChatId !== chatKey) {
+      return;
+    }
+
+    const normalized: Message = {
+      id,
+      body: raw.body ?? "",
+      timestamp: typeof raw.timestamp === "number" ? raw.timestamp : Date.now(),
+      fromMe: !!raw.fromMe,
+      type: raw.type ?? "chat",
+      hasMedia: !!raw.hasMedia,
+      hasQuotedMsg: !!raw.hasQuotedMsg,
+      quotedMsgId: raw.quotedMsgId,
+      isStarred: !!raw.isStarred,
+      ack: typeof raw.ack === "number" ? raw.ack : 0,
+      author: raw.author,
+      vCards: Array.isArray(raw.vCards) ? raw.vCards : [],
+      location: raw.location,
+      reactions: [],
+    };
+
+    setMessages((prev) => {
+      const idx = prev.findIndex((m) => m.id === id);
+      if (idx >= 0) {
+        const next = prev.slice();
+        next[idx] = { ...next[idx], ...normalized, reactions: next[idx].reactions ?? [] };
+        return next;
+      }
+      // Drop any matching local optimistic stub to avoid a flash of duplicates
+      // when SSE races the HTTP send response.
+      const withoutStub = normalized.fromMe
+        ? prev.filter((m) => {
+            if (!m.id.startsWith("local-")) return true;
+            if (m.fromMe !== normalized.fromMe) return true;
+            if ((m.body || "") !== (normalized.body || "")) return true;
+            return false;
+          })
+        : prev;
+      const next = [...withoutStub, normalized];
+      next.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!sessionId || typeof window === "undefined") return;
+    const url = `/api/admin/events?sessionId=${encodeURIComponent(sessionId)}`;
+    const source = new EventSource(url);
+
+    const onMessage = (event: MessageEvent) => {
+      try {
+        const parsed = JSON.parse(event.data);
+        mergeLiveMessage(parsed?.payload);
+      } catch {
+        // ignore bad payloads
+      }
+    };
+
+    const onAck = (event: MessageEvent) => {
+      try {
+        const parsed = JSON.parse(event.data);
+        const payload = parsed?.payload as { messageId?: string; ack?: number } | undefined;
+        if (!payload?.messageId) return;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === payload.messageId && typeof payload.ack === "number"
+              ? { ...m, ack: payload.ack }
+              : m,
+          ),
+        );
+      } catch {
+        // ignore
+      }
+    };
+
+    const onEdit = (event: MessageEvent) => {
+      try {
+        const parsed = JSON.parse(event.data);
+        const payload = parsed?.payload as { messageId?: string; newBody?: string } | undefined;
+        if (!payload?.messageId) return;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === payload.messageId
+              ? { ...m, body: payload.newBody ?? m.body }
+              : m,
+          ),
+        );
+      } catch {
+        // ignore
+      }
+    };
+
+    const onRevoke = (event: MessageEvent) => {
+      try {
+        const parsed = JSON.parse(event.data);
+        const payload = parsed?.payload as { messageId?: string } | undefined;
+        if (!payload?.messageId) return;
+        setMessages((prev) => prev.filter((m) => m.id !== payload.messageId));
+      } catch {
+        // ignore
+      }
+    };
+
+    const onReaction = (event: MessageEvent) => {
+      try {
+        const parsed = JSON.parse(event.data);
+        const payload = parsed?.payload as
+          | { messageId?: string; reaction?: string; senderId?: string; timestamp?: number }
+          | undefined;
+        if (!payload?.messageId) return;
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (m.id !== payload.messageId) return m;
+            const reactions = (m.reactions || []).filter(
+              (r) => r.senderId !== payload.senderId,
+            );
+            if (payload.reaction) {
+              reactions.push({
+                emoji: payload.reaction,
+                senderId: payload.senderId || "",
+                timestamp: payload.timestamp,
+              });
+            }
+            return { ...m, reactions };
+          }),
+        );
+      } catch {
+        // ignore
+      }
+    };
+
+    source.addEventListener("message", onMessage);
+    source.addEventListener("message_create", onMessage);
+    source.addEventListener("message_ack", onAck);
+    source.addEventListener("message_edit", onEdit);
+    source.addEventListener("message_revoke", onRevoke);
+    source.addEventListener("message_reaction", onReaction);
+
+    return () => {
+      source.removeEventListener("message", onMessage);
+      source.removeEventListener("message_create", onMessage);
+      source.removeEventListener("message_ack", onAck);
+      source.removeEventListener("message_edit", onEdit);
+      source.removeEventListener("message_revoke", onRevoke);
+      source.removeEventListener("message_reaction", onReaction);
+      source.close();
+    };
+  }, [mergeLiveMessage, sessionId]);
 
   /* ── Send message ── */
   const handleSend = async () => {
     if ((!msgText.trim() && !attachFile) || !selectedChat) return;
     setSending(true);
+    const pendingText = msgText.trim();
+    const pendingReply = replyTo;
+    const pendingEdit = editMessage;
+    const pendingAttach = attachFile;
+    // Clear composer immediately for snappy UX
+    setMsgText("");
+
+    // Optimistic append for text messages (media sends wait for the server
+    // roundtrip so the real messageId can be used).
+    let optimisticId: string | null = null;
+    if (!pendingAttach && !pendingEdit && pendingText) {
+      optimisticId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const now = Date.now();
+      const optimistic: Message = {
+        id: optimisticId,
+        body: pendingText,
+        timestamp: now,
+        fromMe: true,
+        type: "chat",
+        hasMedia: false,
+        hasQuotedMsg: !!pendingReply,
+        quotedMsgId: pendingReply?.id,
+        isStarred: false,
+        ack: 0,
+        reactions: [],
+      };
+      setMessages((prev) => [...prev, optimistic]);
+    }
+
     try {
-      if (attachFile) {
+      if (pendingAttach) {
         // Send media
         const formData = new FormData();
         formData.append("sessionId", sessionId);
         formData.append("chatId", selectedChat.id);
-        formData.append("file", attachFile);
-        if (msgText.trim()) formData.append("caption", msgText.trim());
+        formData.append("file", pendingAttach);
+        if (pendingText) formData.append("caption", pendingText);
         await fetch("/api/admin/messages/media", {
           method: "POST",
           body: formData,
         });
         setAttachFile(null);
-      } else if (editMessage) {
-        // Edit existing message
+      } else if (pendingEdit) {
         await fetch("/api/admin/messages/actions", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             sessionId,
-            messageId: editMessage.id,
+            messageId: pendingEdit.id,
             action: "edit",
-            content: msgText.trim(),
+            content: pendingText,
           }),
         });
         setEditMessage(null);
@@ -1342,24 +1605,43 @@ export function ChatPanel({ sessionId }: { sessionId: string }) {
         const payload: Record<string, string> = {
           sessionId,
           chatId: selectedChat.id,
-          text: msgText.trim(),
+          text: pendingText,
         };
-        if (replyTo) {
-          payload.quotedMessageId = replyTo.id;
+        if (pendingReply) {
+          payload.quotedMessageId = pendingReply.id;
         }
-        await fetch("/api/admin/messages/send", {
+        const res = await fetch("/api/admin/messages/send", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
+        // Swap optimistic id for server-issued id, so realtime SSE updates
+        // (ack, edit, revoke) apply to the same entry.
+        try {
+          const json = await res.json();
+          const realId: string | undefined = json?.data?.messageId;
+          if (optimisticId && realId) {
+            setMessages((prev) => {
+              const alreadyHasReal = prev.some((m) => m.id === realId);
+              if (alreadyHasReal) {
+                // SSE beat the HTTP response — drop the optimistic stub.
+                return prev.filter((m) => m.id !== optimisticId);
+              }
+              return prev.map((m) =>
+                m.id === optimisticId ? { ...m, id: realId } : m,
+              );
+            });
+          }
+        } catch {
+          // ignore parse failures — SSE will bring the canonical message
+        }
         setReplyTo(null);
       }
-
-      setMsgText("");
-      // refresh messages
-      setTimeout(() => fetchMessages(selectedChat.id), 500);
     } catch {
-      /* ignore */
+      // On failure, drop the optimistic entry to avoid stale ghosts.
+      if (optimisticId) {
+        setMessages((prev) => prev.filter((m) => m.id !== optimisticId));
+      }
     } finally {
       setSending(false);
     }
@@ -1476,22 +1758,38 @@ export function ChatPanel({ sessionId }: { sessionId: string }) {
   };
 
   /* ── Handle react ── */
-  const handleReact = async (msgId: string, emoji: string) => {
-    try {
-      await fetch("/api/admin/messages/actions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionId,
-          messageId: msgId,
-          action: "react",
-          reaction: emoji,
-        }),
-      });
-    } catch {
-      /* ignore */
-    }
-  };
+  const handleReact = useCallback(
+    async (msgId: string, emoji: string) => {
+      try {
+        await fetch("/api/admin/messages/actions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId,
+            messageId: msgId,
+            action: "react",
+            reaction: emoji,
+          }),
+        });
+      } catch {
+        /* ignore */
+      }
+    },
+    [sessionId],
+  );
+
+  /* ── Stable bubble callbacks for memoization ── */
+  const handleBubbleContextMenu = useCallback(
+    (e: React.MouseEvent, msg: Message) => {
+      e.preventDefault();
+      setContextMenu({ msg, pos: { x: e.clientX, y: e.clientY } });
+    },
+    [],
+  );
+  const handleBubbleMediaView = useCallback(
+    (media: MediaData) => setMediaViewer(media),
+    [],
+  );
 
   /* ── Handle forward ── */
   const handleForward = async (targetChatId: string) => {
@@ -1549,6 +1847,7 @@ export function ChatPanel({ sessionId }: { sessionId: string }) {
     () => groupMessagesByDate(filteredMsgs),
     [filteredMsgs]
   );
+  const canLoadOlderMessages = !loadingMsgs && messages.length >= messageLimit;
 
   /* ── Handle keydown ── */
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1876,32 +2175,39 @@ export function ChatPanel({ sessionId }: { sessionId: string }) {
                   <span className="text-sm">No messages yet</span>
                 </div>
               ) : (
-                groupedMessages.map((group) => (
-                  <div key={group.date}>
-                    {/* Date separator */}
-                    <div className="my-3 flex items-center justify-center">
-                      <span className="rounded-lg bg-zinc-800/80 px-3 py-1 text-[11px] font-medium text-zinc-400 shadow-sm">
-                        {group.date}
-                      </span>
-                    </div>
-                    {group.messages.map((msg) => (
-                      <MessageBubble
-                        key={msg.id}
-                        message={msg}
-                        sessionId={sessionId}
-                        onContextMenu={(e, m) => {
-                          e.preventDefault();
-                          setContextMenu({
-                            msg: m,
-                            pos: { x: e.clientX, y: e.clientY },
-                          });
-                        }}
-                        onMediaView={(media) => setMediaViewer(media)}
-                        onReact={handleReact}
-                      />
-                    ))}
+                <>
+                  <div className="mb-2 flex justify-center px-3">
+                    <button
+                      onClick={handleLoadOlderMessages}
+                      disabled={!canLoadOlderMessages}
+                      className="rounded-full border border-zinc-700/70 bg-zinc-800/90 px-4 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:border-emerald-500/40 hover:text-emerald-300 disabled:cursor-not-allowed disabled:opacity-45"
+                    >
+                      {canLoadOlderMessages
+                        ? "Load older"
+                        : `Showing ${messages.length} messages`}
+                    </button>
                   </div>
-                ))
+                  {groupedMessages.map((group) => (
+                    <div key={group.date}>
+                      {/* Date separator */}
+                      <div className="my-3 flex items-center justify-center">
+                        <span className="rounded-lg bg-zinc-800/80 px-3 py-1 text-[11px] font-medium text-zinc-400 shadow-sm">
+                          {group.date}
+                        </span>
+                      </div>
+                      {group.messages.map((msg) => (
+                        <MessageBubble
+                          key={msg.id}
+                          message={msg}
+                          sessionId={sessionId}
+                          onContextMenu={handleBubbleContextMenu}
+                          onMediaView={handleBubbleMediaView}
+                          onReact={handleReact}
+                        />
+                      ))}
+                    </div>
+                  ))}
+                </>
               )}
             </div>
 

@@ -4,11 +4,89 @@ import path from "node:path";
 
 import { Location, MessageMedia, Poll } from "whatsapp-web.js";
 
+import { eventStore, type WaMessage } from "@/server/store/eventStore";
 import { statusStore } from "@/server/store/statusStore";
 import { createWwebjsClient, resolveDataPath } from "@/server/whatsapp/client";
 import { toWhatsAppChatId } from "@/server/whatsapp/phone";
 
 const MAX_RECONNECT_DELAY_MS = 30_000;
+
+/* ------------------------------------------------------------------ */
+/*  wwebjs Message → WaMessage (serialised, SSE-friendly)              */
+/* ------------------------------------------------------------------ */
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function readWid(value: any): string | undefined {
+  if (!value) return undefined;
+  if (typeof value === "string") return value;
+  if (typeof value === "object") {
+    if (typeof value._serialized === "string") return value._serialized;
+    if (typeof value.user === "string" && typeof value.server === "string") {
+      return `${value.user}@${value.server}`;
+    }
+  }
+  return undefined;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function normalizeTs(value: any): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return Date.now();
+  }
+  return value > 1_000_000_000_000 ? value : value * 1000;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function buildWaMessage(raw: any, sessionId: string): WaMessage | null {
+  if (!raw) return null;
+
+  const fromMe = Boolean(raw.fromMe ?? raw.id?.fromMe);
+  const remote = readWid(raw?.id?.remote)
+    ?? readWid(raw?._data?.id?.remote)
+    ?? (fromMe ? readWid(raw?.to) : readWid(raw?.from));
+
+  const from = readWid(raw?.from) ?? (fromMe ? undefined : remote);
+  const to = readWid(raw?.to) ?? (fromMe ? remote : undefined);
+  const id = readWid(raw?.id)
+    ?? readWid(raw?._data?.id)
+    ?? (remote ? `${remote}:${normalizeTs(raw?.timestamp ?? raw?.t)}:${fromMe ? "me" : "them"}` : undefined);
+
+  if (!id) return null;
+
+  const quotedId = raw?.hasQuotedMsg
+    ? (readWid(raw?._data?.quotedStanzaID) ?? readWid(raw?._data?.quotedMsg?.id) ?? undefined)
+    : undefined;
+
+  return {
+    id,
+    sessionId,
+    from: from ?? "",
+    to: to ?? "",
+    fromMe,
+    body: raw?.body ?? raw?.caption ?? raw?._data?.body ?? "",
+    type: raw?.type ?? raw?._data?.type ?? "chat",
+    timestamp: normalizeTs(raw?.timestamp ?? raw?.t),
+    hasMedia: !!raw?.hasMedia,
+    mimetype: raw?._data?.mimetype ?? undefined,
+    filename: raw?._data?.filename ?? undefined,
+    isForwarded: !!raw?.isForwarded,
+    isStarred: !!raw?.isStarred,
+    isStatus: !!raw?.isStatus,
+    ack: typeof raw?.ack === "number" ? raw.ack : 0,
+    author: readWid(raw?.author),
+    mentionedIds: Array.isArray(raw?.mentionedIds) ? raw.mentionedIds.map(String) : [],
+    hasQuotedMsg: !!raw?.hasQuotedMsg,
+    quotedMsgId: quotedId,
+    location: raw?.location
+      ? {
+          latitude: raw.location.latitude,
+          longitude: raw.location.longitude,
+          description: raw.location.description,
+        }
+      : undefined,
+    vCards: Array.isArray(raw?.vCards) ? raw.vCards : [],
+  };
+}
 
 interface SessionContext {
   reconnectAttempts: number;
@@ -164,6 +242,122 @@ class SessionManager {
         lastError: reason,
       });
       this.scheduleReconnect(sessionId, context);
+    });
+
+    /* ---- Real-time message events ---- */
+
+    // `message_create` fires for BOTH inbound and outbound messages,
+    // so this is the canonical realtime entry point for the chat UI.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    client.on("message_create", (raw: any) => {
+      try {
+        const msg = buildWaMessage(raw, sessionId);
+        if (msg) eventStore.pushMessage(msg);
+      } catch (error) {
+        console.warn(
+          `[whatsapp/manager] message_create serialize failed:`,
+          error instanceof Error ? error.message : error,
+        );
+      }
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    client.on("message_ack", (raw: any, ack: number) => {
+      try {
+        const msg = buildWaMessage(raw, sessionId);
+        if (!msg) return;
+        eventStore.updateMessageAck({
+          messageId: msg.id,
+          sessionId,
+          ack: typeof ack === "number" ? ack : msg.ack,
+          timestamp: Date.now(),
+        });
+      } catch {
+        // ignore
+      }
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    client.on("message_edit", (raw: any, newBody: string) => {
+      try {
+        const msg = buildWaMessage(raw, sessionId);
+        if (!msg) return;
+        eventStore.pushEvent({
+          type: "message_edit",
+          sessionId,
+          timestamp: Date.now(),
+          payload: {
+            messageId: msg.id,
+            newBody: typeof newBody === "string" ? newBody : msg.body,
+            chatId: msg.fromMe ? msg.to : msg.from,
+          },
+        });
+      } catch {
+        // ignore
+      }
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    client.on("message_reaction", (reaction: any) => {
+      try {
+        const messageId = readWid(reaction?.msgId) ?? readWid(reaction?.id);
+        if (!messageId) return;
+        eventStore.pushEvent({
+          type: "message_reaction",
+          sessionId,
+          timestamp: Date.now(),
+          payload: {
+            messageId,
+            reaction: reaction?.reaction ?? "",
+            senderId: readWid(reaction?.senderId) ?? "",
+            timestamp: typeof reaction?.timestamp === "number" ? reaction.timestamp : Date.now(),
+            chatId: readWid(reaction?.msgId?.remote),
+          },
+        });
+      } catch {
+        // ignore
+      }
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    client.on("message_revoke_everyone", (after: any, before: any) => {
+      try {
+        const source = before ?? after;
+        const msg = buildWaMessage(source, sessionId);
+        if (!msg) return;
+        eventStore.pushEvent({
+          type: "message_revoke",
+          sessionId,
+          timestamp: Date.now(),
+          payload: {
+            messageId: msg.id,
+            by: "everyone",
+            chatId: msg.fromMe ? msg.to : msg.from,
+          },
+        });
+      } catch {
+        // ignore
+      }
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    client.on("message_revoke_me", (raw: any) => {
+      try {
+        const msg = buildWaMessage(raw, sessionId);
+        if (!msg) return;
+        eventStore.pushEvent({
+          type: "message_revoke",
+          sessionId,
+          timestamp: Date.now(),
+          payload: {
+            messageId: msg.id,
+            by: "me",
+            chatId: msg.fromMe ? msg.to : msg.from,
+          },
+        });
+      } catch {
+        // ignore
+      }
     });
   }
 
@@ -659,7 +853,7 @@ class SessionManager {
     throw new Error("Unblock contact is not supported by this client version");
   }
 
-  async getChatMessages(sessionId: string, chatId: string, limit = 50) {
+  async getChatMessages(sessionId: string, chatId: string, limit = Number.POSITIVE_INFINITY) {
     const client = await this.ensureSession(sessionId);
     const normalizedChatId = this.normalizeChatId(chatId);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -837,10 +1031,13 @@ class SessionManager {
               msgs = [];
             }
 
-            const mergeUnique = (items: any[]) => {
-              const seen = new Set();
-              return items.filter((item: any) => {
-                const key = item?.id?._serialized ?? String(item?.id ?? "");
+            const mergeUnique = (items: unknown[]) => {
+              const seen = new Set<string>();
+              return items.filter((item) => {
+                const candidate = item as { id?: { _serialized?: string } | string } | null;
+                const key = typeof candidate?.id === "string"
+                  ? candidate.id
+                  : candidate?.id?._serialized ?? "";
                 if (!key || seen.has(key)) {
                   return false;
                 }
@@ -1100,6 +1297,50 @@ class SessionManager {
       return value > 1_000_000_000_000 ? value : value * 1000;
     };
 
+    const serializeMessageId = (value: unknown) => {
+      if (!value) {
+        return undefined;
+      }
+
+      if (typeof value === "string") {
+        return value;
+      }
+
+      if (typeof value === "object") {
+        const candidate = value as {
+          _serialized?: string;
+          id?: string | { _serialized?: string };
+          remote?: { _serialized?: string } | string;
+          fromMe?: boolean;
+          participant?: { _serialized?: string } | string;
+        };
+
+        if (typeof candidate._serialized === "string") {
+          return candidate._serialized;
+        }
+
+        if (typeof candidate.id === "string") {
+          return candidate.id;
+        }
+
+        if (
+          candidate.id
+          && typeof candidate.id === "object"
+          && typeof candidate.id._serialized === "string"
+        ) {
+          return candidate.id._serialized;
+        }
+
+        const remote = serializeWidLike(candidate.remote);
+        const participant = serializeWidLike(candidate.participant);
+        if (remote) {
+          return [remote, candidate.fromMe ? "1" : "0", participant || ""].join(":");
+        }
+      }
+
+      return undefined;
+    };
+
     const serializeWidLike = (value: unknown) => {
       if (!value) {
         return undefined;
@@ -1125,9 +1366,17 @@ class SessionManager {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const normalizeMessage = (msg: any) => {
       const timestamp = normalizeTimestamp(msg?.timestamp ?? msg?.t);
-      const msgId = msg?.id?._serialized
-        ?? (typeof msg?.id === "string" ? msg.id : undefined)
-        ?? `${chatIdSerialized}:${timestamp}:${msg?.fromMe ? "me" : "them"}`;
+      const fromMe = Boolean(msg?.fromMe ?? msg?.id?.fromMe);
+      const msgId = serializeMessageId(msg?.id)
+        ?? serializeMessageId(msg?._data?.id)
+        ?? serializeMessageId(msg?.rawData?.id)
+        ?? [
+          chatIdSerialized,
+          timestamp,
+          fromMe ? "me" : "them",
+          msg?.type ?? "chat",
+          msg?.body ?? msg?.caption ?? "",
+        ].join(":");
 
       // Prefer async reactions (getReactions) over _data.reactions, merge both
       const fromData = extractReactions(msg);
@@ -1146,9 +1395,9 @@ class SessionManager {
       return {
         id: msgId,
         sessionId,
-        from: serializeWidLike(msg?.from) ?? (msg?.fromMe ? undefined : chatIdSerialized),
-        to: serializeWidLike(msg?.to) ?? (msg?.fromMe ? chatIdSerialized : undefined),
-        fromMe: !!msg?.fromMe,
+        from: serializeWidLike(msg?.from) ?? (fromMe ? undefined : chatIdSerialized),
+        to: serializeWidLike(msg?.to) ?? (fromMe ? chatIdSerialized : undefined),
+        fromMe,
         body: msg?.body ?? msg?.caption ?? "",
         type: msg?.type ?? "chat",
         timestamp,
@@ -1186,7 +1435,7 @@ class SessionManager {
       })
       .filter((msg): msg is NonNullable<typeof msg> => msg !== null)
       .sort((left, right) => left.timestamp - right.timestamp)
-      .filter((msg, index, items) => index === items.findIndex((candidate) => candidate.id === msg.id));
+        .filter((msg, index, items) => index === items.findIndex((candidate) => candidate.id === msg.id));
   }
 
   async sendSeen(sessionId: string, chatId: string) {
